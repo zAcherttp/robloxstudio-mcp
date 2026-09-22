@@ -22,6 +22,7 @@ import {
 } from '../image-decode.js';
 import { DOC_CATEGORIES, getRobloxDoc, isDocCategory } from '../roblox-docs.js';
 import { findBuiltInStudioSkill, loadBuiltInStudioSkills } from '../studio-skills.js';
+import { CORE_LESSONS, CORE_LESSON_COUNT } from '../knowledge/lessons.js';
 import { rgbaToJpeg } from '../jpeg-encoder.js';
 import { rgbaToPng } from '../png-encoder.js';
 import {
@@ -1043,6 +1044,60 @@ export class RobloxStudioTools {
 
   private _textResult(body: Record<string, unknown>) {
     return { content: [{ type: 'text', text: JSON.stringify(body) }] };
+  }
+
+  // The framework's own hard-won knowledge, vendored at build time so a machine with the MCP
+  // and no roblox-core checkout still gets it. Sibling to get_roblox_skills: that one serves
+  // Roblox's installed Assistant skills, this one serves ours.
+  async getCoreLessons(domain?: string) {
+    const filter = (domain ?? '').trim().toUpperCase();
+    if (!filter) {
+      return {
+        content: [
+          {
+            type: 'text',
+            text: JSON.stringify({
+              source: 'roblox-core/LESSONS.md',
+              count: CORE_LESSON_COUNT,
+              lessons: CORE_LESSONS,
+            }),
+          },
+        ],
+      };
+    }
+
+    // A lesson is a tagged line plus the indented arrow line under it; keep them together or
+    // the answer is half a sentence.
+    const lines = CORE_LESSONS.split('\n');
+    const kept: string[] = [];
+    let keeping = false;
+    for (const line of lines) {
+      const tagged = /^([A-Z]{3,8}) {2}(.*)$/.exec(line);
+      if (tagged) {
+        keeping = line.toUpperCase().includes(filter);
+        if (keeping) kept.push(line);
+        continue;
+      }
+      if (keeping && /^\s+/.test(line) && line.trim().length > 0) {
+        kept.push(line);
+        continue;
+      }
+      keeping = false;
+    }
+
+    return {
+      content: [
+        {
+          type: 'text',
+          text: JSON.stringify({
+            source: 'roblox-core/LESSONS.md',
+            domain: filter,
+            count: kept.filter((line) => /^[A-Z]{3,8} {2}/.test(line)).length,
+            lessons: kept.length > 0 ? kept.join('\n') : `No lesson mentions "${filter}".`,
+          }),
+        },
+      ],
+    };
   }
 
   async getRobloxSkills(action: string, name?: string) {

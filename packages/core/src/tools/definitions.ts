@@ -7,6 +7,14 @@ export interface ToolDefinition {
   name: string;
   description: string;
   category: ToolCategory;
+  /**
+   * Read-only tools are offered by the inspector server too. Set this false for one that is
+   * genuinely read-only but does not belong on that minimal surface -- the inspector catalog is
+   * held under a character budget that has not moved across releases, and the honest way to stay
+   * under it is to say which tools are not inspection, rather than to mislabel a category or
+   * raise the line.
+   */
+  inspector?: boolean;
   inputSchema: object;
   outputSchema?: object;
   annotations?: ToolAnnotations;
@@ -1776,6 +1784,28 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
     }
   },
 
+  // === Framework Lessons ===
+  {
+    name: 'get_core_lessons',
+    category: 'read',
+    // Read-only, but it is knowledge for writing code rather than a way to inspect a place, so
+    // it stays off the inspector's minimal surface.
+    inspector: false,
+    // The catalog shortens anything past 120 characters, so this says the one thing that has to
+    // survive: read it first, and it is short.
+    description:
+      'Use first in a roblox-core project: every Roblox trap this kit already paid for, one line each.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        domain: {
+          type: 'string',
+          description: 'Optional substring filter, e.g. PROPERTY or MEASURE. Omit for all.'
+        }
+      }
+    }
+  },
+
   // === Documentation ===
   {
     name: 'get_roblox_docs',
@@ -1803,5 +1833,6 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
   },
 ];
 
-export const getReadOnlyTools = () => TOOL_DEFINITIONS.filter(t => t.category === 'read');
+export const getReadOnlyTools = () =>
+  TOOL_DEFINITIONS.filter(t => t.category === 'read' && t.inspector !== false);
 export const getAllTools = () => [...TOOL_DEFINITIONS];
