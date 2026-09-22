@@ -433,3 +433,18 @@ export function decodeImagePathToRgba(imagePath: string): DecodedRgbaImage {
   const resolved = path.resolve(imagePath);
   return decodePngToRgba(readPngFileWithinLimit(resolved, imagePath));
 }
+
+// Screenshots keep every pixel. decodePngToRgba resizes to the editable-image
+// upload bound, which is right for an asset and wrong for a window capture: the
+// viewport crop finds its corner markers by pixel position and
+// simulate_mouse_input sends coordinates in that same space, so a capture that
+// quietly came back at 1024 wide would put both of them somewhere else.
+export function decodeScreenshotPngToRgba(data: Buffer): DecodedRgbaImage {
+  const png = inflatePng(data, MAX_SCREENSHOT_PNG_PIXELS);
+  return { width: png.width, height: png.height, rgba: convertScanlinesToRgba(png) };
+}
+
+export function decodeScreenshotPathToRgba(imagePath: string): DecodedRgbaImage {
+  const resolved = path.resolve(imagePath);
+  return decodeScreenshotPngToRgba(readPngFileWithinLimit(resolved, imagePath));
+}

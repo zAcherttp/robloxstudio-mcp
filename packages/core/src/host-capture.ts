@@ -20,6 +20,7 @@ import { spawn } from 'child_process';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
+import { decodeScreenshotPathToRgba } from './image-decode.js';
 
 export type HostWindowCapture = {
   width: number;
@@ -54,11 +55,11 @@ export function isHostCaptureDisabled(env: NodeJS.ProcessEnv = process.env): boo
 }
 
 export function isHostCaptureSupported(platform: NodeJS.Platform = process.platform): boolean {
-  return platform === 'win32';
+  return platform === 'win32' || platform === 'darwin';
 }
 
 export function hostCaptureUnsupportedReason(platform: NodeJS.Platform = process.platform): string {
-  return `host window capture is only implemented on Windows (this is ${platform})`;
+  return `host window capture is implemented on Windows and macOS (this is ${platform})`;
 }
 
 // True when every pixel has the same RGB value — what Studio returns when the
@@ -346,6 +347,123 @@ function runWindowsCapture(titleHint: string | undefined, outFile: string): Prom
   });
 }
 
+// macOS window capture.
+//
+// `screencapture -l <windowid>` is the counterpart to Windows' PrintWindow: it
+// asks the window server for one window's composited surface, so it works while
+// Studio sits behind other windows, which is the normal case when an agent is
+// driving it. Capturing the whole screen instead would need Studio unoccluded
+// and would sweep up the rest of the desktop on the way past.
+//
+// The window id comes from CGWindowListCopyWindowInfo through JXA. Note the
+// castRefToObject: CFArrayGetValueAtIndex hands back an untyped pointer, and
+// ObjC.deepUnwrap on it silently yields empty dictionaries rather than failing,
+// so every window looks nameless and nothing ever matches.
+//
+// Both steps need Screen Recording permission for whichever process runs this
+// server. Without it screencapture writes a frame with no window content in it,
+// which is why the caller checks for a uniform frame and says so.
+const MACOS_WINDOW_SCRIPT = `
+ObjC.import("CoreGraphics");
+ObjC.import("Foundation");
+const info = $.CGWindowListCopyWindowInfo(
+  $.kCGWindowListOptionOnScreenOnly | $.kCGWindowListExcludeDesktopElements,
+  $.kCGNullWindowID,
+);
+const windows = ObjC.castRefToObject(info);
+const out = [];
+for (let i = 0; i < windows.count; i++) {
+  const w = windows.objectAtIndex(i);
+  const owner = ObjC.unwrap(w.objectForKey("kCGWindowOwnerName")) || "";
+  if (!/roblox\\s*studio/i.test(owner)) continue;
+  const bounds = ObjC.deepUnwrap(w.objectForKey("kCGWindowBounds")) || {};
+  out.push({
+    id: ObjC.unwrap(w.objectForKey("kCGWindowNumber")),
+    title: ObjC.unwrap(w.objectForKey("kCGWindowName")) || "",
+    layer: ObjC.unwrap(w.objectForKey("kCGWindowLayer")),
+    width: bounds.Width || 0,
+    height: bounds.Height || 0,
+  });
+}
+JSON.stringify(out);
+`;
+
+type MacWindow = { id: number; title: string; layer: number; width: number; height: number };
+
+function runCommand(command: string, args: string[]): Promise<{ code: number; stdout: string; stderr: string }> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+    let stdout = '';
+    let stderr = '';
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      child.kill();
+      reject(new Error(`${command} timed out after ${HOST_CAPTURE_TIMEOUT_MS}ms`));
+    }, HOST_CAPTURE_TIMEOUT_MS);
+    child.stdout.setEncoding('utf8');
+    child.stderr.setEncoding('utf8');
+    child.stdout.on('data', (chunk: string) => { stdout += chunk; });
+    child.stderr.on('data', (chunk: string) => { stderr += chunk; });
+    child.on('error', (error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      reject(new Error(`could not start ${command}: ${error.message}`));
+    });
+    child.on('close', (code) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve({ code: code ?? -1, stdout, stderr });
+    });
+  });
+}
+
+// The Studio window to capture. Prefers one whose title contains `titleHint`
+// (the place name, for when several places are open), then the largest ordinary
+// window — Studio also owns small layer-0 panels and tooltips.
+export function pickStudioWindow(windows: MacWindow[], titleHint?: string): MacWindow | undefined {
+  const usable = windows.filter((w) => w.layer === 0 && w.width > 200 && w.height > 200);
+  const hint = (titleHint ?? '').trim().toLowerCase();
+  const named = hint
+    ? usable.filter((w) => w.title.toLowerCase().includes(hint))
+    : [];
+  const pool = named.length > 0 ? named : usable;
+  return pool.sort((a, b) => b.width * b.height - a.width * a.height)[0];
+}
+
+async function captureMacWindow(titleHint: string | undefined, outFile: string): Promise<HostWindowCapture> {
+  const listed = await runCommand('/usr/bin/osascript', ['-l', 'JavaScript', '-e', MACOS_WINDOW_SCRIPT]);
+  if (listed.code !== 0) {
+    throw new Error(`could not list windows: ${(listed.stderr || listed.stdout).trim().slice(0, 400)}`);
+  }
+  let windows: MacWindow[];
+  try {
+    windows = JSON.parse(listed.stdout.trim() || '[]') as MacWindow[];
+  } catch {
+    throw new Error(`could not read the window list: ${listed.stdout.trim().slice(0, 200)}`);
+  }
+  const target = pickStudioWindow(windows, titleHint);
+  if (!target) {
+    throw new Error(
+      windows.length === 0
+        ? 'no Roblox Studio window found; if Studio is open, this server needs Screen Recording permission to see it'
+        : 'no usable Roblox Studio window found (only panels and tooltips)',
+    );
+  }
+
+  // -x is no shutter sound, -o drops the window shadow so the frame is the
+  // window itself.
+  const shot = await runCommand('/usr/sbin/screencapture', ['-x', '-o', '-l', String(target.id), '-t', 'png', outFile]);
+  if (shot.code !== 0 || !fs.existsSync(outFile)) {
+    throw new Error(`screencapture failed: ${(shot.stderr || shot.stdout).trim().slice(0, 400) || `exit ${shot.code}`}`);
+  }
+  const decoded = decodeScreenshotPathToRgba(outFile);
+  return { width: decoded.width, height: decoded.height, rgba: decoded.rgba, title: target.title };
+}
+
 // Captures the Studio window's client area as RGBA. `titleHint` is the place
 // name shown in the window title (used to pick among several open places).
 export async function captureStudioWindow(titleHint?: string): Promise<HostCaptureResult> {
@@ -354,6 +472,23 @@ export async function captureStudioWindow(titleHint?: string): Promise<HostCaptu
   }
   if (!isHostCaptureSupported()) {
     return { ok: false, error: hostCaptureUnsupportedReason() };
+  }
+  if (process.platform === 'darwin') {
+    const outFile = path.join(os.tmpdir(), `robloxstudio-mcp-capture-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}.png`);
+    try {
+      const capture = await captureMacWindow(titleHint, outFile);
+      if (isUniformFrame(capture.rgba, capture.width, capture.height)) {
+        return {
+          ok: false,
+          error: 'the captured Studio window had no content in it; this server needs Screen Recording permission on macOS',
+        };
+      }
+      return { ok: true, capture };
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : String(error) };
+    } finally {
+      fs.rmSync(outFile, { force: true });
+    }
   }
   const outFile = path.join(os.tmpdir(), `robloxstudio-mcp-capture-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}.bgra`);
   try {

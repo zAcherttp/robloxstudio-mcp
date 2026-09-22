@@ -1,9 +1,13 @@
 import {
   cropToViewport,
   findViewportRect,
+  hostCaptureUnsupportedReason,
   isHostCaptureDisabled,
+  isHostCaptureSupported,
   isUniformFrame,
+  pickStudioWindow,
 } from '../host-capture.js';
+import { decodeScreenshotPngToRgba } from '../image-decode.js';
 import type { HostCaptureResult } from '../host-capture.js';
 import { BridgeService } from '../bridge-service.js';
 import { RobloxStudioTools } from '../tools/index.js';
@@ -574,5 +578,64 @@ describe('capture_screenshot host window fallback', () => {
     expect(text.message).not.toContain('host OS');
     expect(grabs).toBe(0);
     expect(request.mock.calls.some(([endpoint]) => endpoint === '/api/capture-markers')).toBe(false);
+  });
+});
+
+
+describe('macOS host capture', () => {
+  it('is supported on macOS as well as Windows', () => {
+    expect(isHostCaptureSupported('darwin')).toBe(true);
+    expect(isHostCaptureSupported('win32')).toBe(true);
+    expect(isHostCaptureSupported('linux')).toBe(false);
+    expect(hostCaptureUnsupportedReason('linux')).toContain('linux');
+  });
+
+  const windows = [
+    { id: 1, title: 'Toolbox', layer: 0, width: 300, height: 400 },
+    { id: 2, title: 'OreWorks - Roblox Studio', layer: 0, width: 1470, height: 923 },
+    { id: 3, title: 'Other Place - Roblox Studio', layer: 0, width: 1900, height: 1000 },
+    { id: 4, title: 'tooltip', layer: 25, width: 1920, height: 1080 },
+  ];
+
+  it('prefers the window whose title matches the place, over a larger one', () => {
+    expect(pickStudioWindow(windows, 'OreWorks')?.id).toBe(2);
+  });
+
+  it('falls back to the largest ordinary window when no title is given', () => {
+    expect(pickStudioWindow(windows)?.id).toBe(3);
+  });
+
+  it('never picks an overlay layer, even when it is the biggest thing on screen', () => {
+    // windows[3] is a full-screen tooltip on layer 25; windows[0] is a small
+    // ordinary panel. The panel wins because the overlay is not a window to
+    // capture, however large it is.
+    expect(pickStudioWindow([windows[0], windows[3]])?.id).toBe(1);
+  });
+
+  it('ignores slivers that are too small to be a Studio window', () => {
+    expect(pickStudioWindow([{ id: 9, title: '', layer: 0, width: 40, height: 20 }])).toBeUndefined();
+  });
+
+  it('returns nothing when Studio has no windows at all', () => {
+    expect(pickStudioWindow([], 'OreWorks')).toBeUndefined();
+  });
+});
+
+describe('screenshot decoding', () => {
+  // A screenshot has to survive at its own size: the viewport crop finds corner
+  // markers by pixel position and simulate_mouse_input sends coordinates in the
+  // same space, so the editable-image resize would move both.
+  it('keeps every pixel of a capture larger than the upload bound', () => {
+    const width = 2000;
+    const height = 1200;
+    const rgba = Buffer.alloc(width * height * 4, 0);
+    for (let i = 0; i < width * height; i++) {
+      rgba[i * 4] = i % 256;
+      rgba[i * 4 + 3] = 255;
+    }
+    const decoded = decodeScreenshotPngToRgba(rgbaToPng(rgba, width, height));
+    expect(decoded.width).toBe(width);
+    expect(decoded.height).toBe(height);
+    expect(decoded.rgba.length).toBe(width * height * 4);
   });
 });
