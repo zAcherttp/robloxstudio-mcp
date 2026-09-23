@@ -16,17 +16,25 @@
 // pins four magenta squares to the viewport corners so the window capture can
 // be cropped to exactly the viewport — the coordinate space simulate_mouse_input
 // expects — without guessing at Studio's dock layout or the DPI scale.
+// On macOS, ScreenCaptureKit captures only the selected Studio window after
+// verifying existing Screen Recording permission and its stable window identity;
+// where its helper cannot be built or run, screencapture does the same job.
 import { spawn } from 'child_process';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
+import { captureMacStudioWindow, prepareMacHostCapture } from './host-capture-macos.js';
 import { decodeScreenshotPathToRgba } from './image-decode.js';
+
+// macOS uses the app bundle ID; Windows uses the verified executable name.
+export type HostWindowIdentity = { windowId: number; processId: number; bundleIdentifier: string };
 
 export type HostWindowCapture = {
   width: number;
   height: number;
   rgba: Buffer;
   title: string;
+  identity?: HostWindowIdentity;
 };
 
 export type HostCaptureResult =
@@ -59,7 +67,23 @@ export function isHostCaptureSupported(platform: NodeJS.Platform = process.platf
 }
 
 export function hostCaptureUnsupportedReason(platform: NodeJS.Platform = process.platform): string {
-  return `host window capture is implemented on Windows and macOS (this is ${platform})`;
+  return `host window capture is only implemented on Windows and macOS (this is ${platform})`;
+}
+
+// Why the ScreenCaptureKit helper could not be built, if it could not; undefined when it is ready.
+async function macHelperProblem(): Promise<string | undefined> {
+  try {
+    await prepareMacHostCapture();
+    return undefined;
+  } catch (error) {
+    return error instanceof Error ? error.message : String(error);
+  }
+}
+
+// Builds the macOS helper ahead of the marker transaction. It does not throw when the helper
+// cannot be built: the capture then falls back to screencapture (see captureStudioWindow).
+export async function prepareHostWindowCapture(): Promise<void> {
+  if (process.platform === 'darwin' && !isHostCaptureDisabled()) await macHelperProblem();
 }
 
 // True when every pixel has the same RGB value — what Studio returns when the
@@ -198,7 +222,7 @@ export function cropToViewport(
 // PowerShell program that finds the Studio window and dumps its client area
 // as raw 32-bit BGRA. Inputs arrive through environment variables so no
 // shell quoting is involved; the single JSON line on stdout is the result.
-const WINDOWS_CAPTURE_SCRIPT = String.raw`
+export const WINDOWS_CAPTURE_SCRIPT = String.raw`
 $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 Add-Type -AssemblyName System.Drawing
@@ -247,13 +271,25 @@ $hint = $env:MCP_CAPTURE_TITLE_HINT
 $outFile = $env:MCP_CAPTURE_OUT
 $candidates = [McpStudioCapture]::Find('RobloxStudioBeta')
 if ($candidates.Count -eq 0) { Emit @{ ok = $false; error = 'no visible Roblox Studio window was found' }; exit 0 }
-$pick = $null
-if ($hint) { $pick = $candidates | Where-Object { $_.Title.StartsWith($hint) } | Select-Object -First 1 }
-if ($pick -eq $null -and $candidates.Count -eq 1) { $pick = $candidates[0] }
-if ($pick -eq $null) {
-  $titles = ($candidates | ForEach-Object { $_.Title }) -join ' | '
-  Emit @{ ok = $false; error = "could not pick a Studio window for '$hint' among: $titles" }; exit 0
+$matching = @($candidates | Where-Object { -not $hint -or $_.Title.StartsWith($hint, [StringComparison]::Ordinal) })
+$expectedJson = $env:MCP_CAPTURE_EXPECTED_IDENTITY
+if ($expectedJson) {
+  try { $expected = $expectedJson | ConvertFrom-Json -ErrorAction Stop }
+  catch { Emit @{ ok = $false; error = 'invalid expected Studio window identity' }; exit 0 }
+  $matching = @($matching | Where-Object {
+    $_.Handle.ToInt64() -eq $expected.windowId -and $_.Pid -eq $expected.processId -and
+    $expected.bundleIdentifier -ceq 'RobloxStudioBeta'
+  })
+  if ($matching.Count -ne 1) {
+    Emit @{ ok = $false; error = 'the selected Roblox Studio window identity changed between captures' }; exit 0
+  }
+} elseif ($matching.Count -ne 1) {
+  $reason = if ($matching.Count -eq 0) { 'no visible Roblox Studio window matches the requested place title' }
+    else { 'multiple Roblox Studio windows match the requested place title; the capture is ambiguous' }
+  Emit @{ ok = $false; error = $reason }; exit 0
 }
+$pick = $matching[0]
+$identity = @{ windowId = $pick.Handle.ToInt64(); processId = [long]$pick.Pid; bundleIdentifier = 'RobloxStudioBeta' }
 if ([McpStudioCapture]::IsIconic($pick.Handle)) {
   Emit @{ ok = $false; error = "the Studio window '$($pick.Title)' is minimized; restore it (it may stay behind other windows)" }; exit 0
 }
@@ -275,17 +311,40 @@ $bytes = New-Object byte[] ($data.Stride * $h)
 $stride = $data.Stride
 $bmp.UnlockBits($data); $bmp.Dispose()
 [System.IO.File]::WriteAllBytes($outFile, $bytes)
-Emit @{ ok = $true; width = $w; height = $h; stride = $stride; title = $pick.Title }
+Emit @{ ok = $true; width = $w; height = $h; stride = $stride; title = $pick.Title; identity = $identity }
 `;
 
-type WindowsCaptureReport = {
-  ok: boolean;
-  error?: string;
-  width?: number;
-  height?: number;
-  stride?: number;
-  title?: string;
-};
+type WindowsCaptureReport =
+  | { ok: false; error: string }
+  | { ok: true; width: number; height: number; stride: number; title: string; identity: HostWindowIdentity };
+
+function validWindowsIdentity(value: unknown): value is HostWindowIdentity {
+  return value !== null && typeof value === 'object' &&
+    'windowId' in value && typeof value.windowId === 'number' && Number.isSafeInteger(value.windowId) && value.windowId > 0 &&
+    'processId' in value && typeof value.processId === 'number' && Number.isSafeInteger(value.processId) &&
+    value.processId > 0 && value.processId <= 0xffffffff &&
+    'bundleIdentifier' in value && value.bundleIdentifier === 'RobloxStudioBeta';
+}
+
+function parseWindowsCaptureReport(value: unknown, expectedIdentity?: HostWindowIdentity): WindowsCaptureReport {
+  if (value === null || typeof value !== 'object' || !('ok' in value)) throw new Error('invalid Windows capture report');
+  if (value.ok === false && 'error' in value && typeof value.error === 'string') return { ok: false, error: value.error };
+  if (!('identity' in value) || !validWindowsIdentity(value.identity)) throw new Error('invalid Windows capture window identity');
+  const identity = value.identity;
+  if (expectedIdentity && (identity.windowId !== expectedIdentity.windowId || identity.processId !== expectedIdentity.processId ||
+      identity.bundleIdentifier !== expectedIdentity.bundleIdentifier)) {
+    throw new Error('the selected Roblox Studio window identity changed between captures');
+  }
+  if (value.ok !== true ||
+      !('width' in value) || typeof value.width !== 'number' || !Number.isSafeInteger(value.width) || value.width <= 0 ||
+      !('height' in value) || typeof value.height !== 'number' || !Number.isSafeInteger(value.height) || value.height <= 0 ||
+      !('stride' in value) || typeof value.stride !== 'number' || !Number.isSafeInteger(value.stride) || value.stride < value.width * 4 ||
+      value.width > 16384 || value.height > 16384 || value.stride * value.height > 128 * 1024 * 1024 ||
+      !('title' in value) || typeof value.title !== 'string') {
+    throw new Error('invalid Windows capture dimensions or title');
+  }
+  return { ok: true, width: value.width, height: value.height, stride: value.stride, title: value.title, identity };
+}
 
 function powershellPath(): string {
   const systemRoot = process.env.SystemRoot ?? process.env.windir;
@@ -296,99 +355,115 @@ function powershellPath(): string {
   return 'powershell.exe';
 }
 
-function runWindowsCapture(titleHint: string | undefined, outFile: string): Promise<WindowsCaptureReport> {
-  return new Promise((resolve, reject) => {
-    const encoded = Buffer.from(WINDOWS_CAPTURE_SCRIPT, 'utf16le').toString('base64');
-    const child = spawn(
-      powershellPath(),
-      ['-NoProfile', '-NonInteractive', '-NoLogo', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', encoded],
-      {
-        env: { ...process.env, MCP_CAPTURE_TITLE_HINT: titleHint ?? '', MCP_CAPTURE_OUT: outFile },
-        stdio: ['ignore', 'pipe', 'pipe'],
-        windowsHide: true,
+function runWindowsCapture(titleHint: string | undefined, outFile: string, expectedIdentity?: HostWindowIdentity): Promise<unknown> {
+  const { promise, resolve, reject } = Promise.withResolvers<unknown>();
+  const encoded = Buffer.from(WINDOWS_CAPTURE_SCRIPT, 'utf16le').toString('base64');
+  const child = spawn(
+    powershellPath(),
+    ['-NoProfile', '-NonInteractive', '-NoLogo', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', encoded],
+    {
+      env: {
+        ...process.env, MCP_CAPTURE_TITLE_HINT: titleHint ?? '', MCP_CAPTURE_OUT: outFile,
+        MCP_CAPTURE_EXPECTED_IDENTITY: expectedIdentity ? JSON.stringify(expectedIdentity) : '',
       },
-    );
-    let stdout = '';
-    let stderr = '';
-    let settled = false;
-    const timer = setTimeout(() => {
-      if (settled) return;
-      settled = true;
-      child.kill();
-      reject(new Error(`host window capture timed out after ${HOST_CAPTURE_TIMEOUT_MS}ms`));
-    }, HOST_CAPTURE_TIMEOUT_MS);
-    child.stdout.setEncoding('utf8');
-    child.stderr.setEncoding('utf8');
-    child.stdout.on('data', (chunk: string) => { stdout += chunk; });
-    child.stderr.on('data', (chunk: string) => { stderr += chunk; });
-    child.on('error', (error) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      reject(new Error(`could not start PowerShell for host window capture: ${error.message}`));
-    });
-    child.on('close', (code) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      const lines = stdout.split(/\r?\n/).map((line) => line.trim()).filter((line) => line.length > 0);
-      const last = lines[lines.length - 1];
-      if (last && last.startsWith('{')) {
-        try {
-          resolve(JSON.parse(last) as WindowsCaptureReport);
-          return;
-        } catch {
-          // fall through to the generic failure below
-        }
-      }
-      const detail = (stderr.trim() || stdout.trim()).slice(0, 600);
-      reject(new Error(`host window capture helper exited with code ${code}${detail ? `: ${detail}` : ''}`));
-    });
+      stdio: ['ignore', 'pipe', 'pipe'],
+      windowsHide: true,
+    },
+  );
+  let stdout = '';
+  let stderr = '';
+  let settled = false;
+  const timer = setTimeout(() => {
+    if (settled) return;
+    settled = true;
+    child.kill();
+    reject(new Error(`host window capture timed out after ${HOST_CAPTURE_TIMEOUT_MS}ms`));
+  }, HOST_CAPTURE_TIMEOUT_MS);
+  child.stdout.setEncoding('utf8');
+  child.stderr.setEncoding('utf8');
+  child.stdout.on('data', (chunk: string) => { stdout += chunk; });
+  child.stderr.on('data', (chunk: string) => { stderr += chunk; });
+  child.on('error', (error) => {
+    if (settled) return;
+    settled = true;
+    clearTimeout(timer);
+    reject(new Error(`could not start PowerShell for host window capture: ${error.message}`));
   });
+  child.on('close', (code) => {
+    if (settled) return;
+    settled = true;
+    clearTimeout(timer);
+    const lines = stdout.split(/\r?\n/).map((line) => line.trim()).filter((line) => line.length > 0);
+    const last = lines[lines.length - 1];
+    if (last && last.startsWith('{')) {
+      try {
+        resolve(JSON.parse(last));
+        return;
+      } catch {
+        // fall through to the generic failure below
+      }
+    }
+    const detail = (stderr.trim() || stdout.trim()).slice(0, 600);
+    reject(new Error(`host window capture helper exited with code ${code}${detail ? `: ${detail}` : ''}`));
+  });
+  return promise;
 }
 
-// macOS window capture.
+// macOS fallback: screencapture.
 //
-// `screencapture -l <windowid>` is the counterpart to Windows' PrintWindow: it
-// asks the window server for one window's composited surface, so it works while
-// Studio sits behind other windows, which is the normal case when an agent is
-// driving it. Capturing the whole screen instead would need Studio unoccluded
-// and would sweep up the rest of the desktop on the way past.
+// The primary macOS path is the ScreenCaptureKit helper in host-capture-macos.ts. This one runs
+// only when that helper cannot run at all: it is compiled on first use with `xcrun swiftc`, which
+// needs the Xcode command-line tools, and ScreenCaptureKit's screenshot API needs macOS 14. It
+// keeps the helper's rules: Screen Recording permission is checked and never requested, the
+// window is found by Studio's bundle ID and must be the only one matching the place title, and its
+// identity is pinned between captures. It also ignores Studio windows under 200 points either
+// way, the tooltips and small panels that are otherwise another candidate.
 //
-// The window id comes from CGWindowListCopyWindowInfo through JXA. Note the
-// castRefToObject: CFArrayGetValueAtIndex hands back an untyped pointer, and
-// ObjC.deepUnwrap on it silently yields empty dictionaries rather than failing,
-// so every window looks nameless and nothing ever matches.
-//
-// Both steps need Screen Recording permission for whichever process runs this
-// server. Without it screencapture writes a frame with no window content in it,
-// which is why the caller checks for a uniform frame and says so.
+// `screencapture -l <windowid>` is the counterpart to Windows' PrintWindow: it asks the window
+// server for one window's composited surface, so it works while Studio sits behind other windows.
+// The window list comes from CGWindowListCopyWindowInfo through JXA. Note the castRefToObject:
+// CFArrayGetValueAtIndex hands back an untyped pointer, and ObjC.deepUnwrap on it silently yields
+// empty dictionaries rather than failing, so every window looks nameless and nothing matches.
+// And the PNG is decoded at its own size (decodeScreenshotPathToRgba): the viewport crop finds its
+// corner markers by pixel position, and a capture quietly resized to an upload bound moves them.
+const STUDIO_BUNDLE_ID = 'com.Roblox.RobloxStudio';
+const MIN_WINDOW_POINTS = 200;
+
 const MACOS_WINDOW_SCRIPT = `
 ObjC.import("CoreGraphics");
 ObjC.import("Foundation");
-const info = $.CGWindowListCopyWindowInfo(
-  $.kCGWindowListOptionOnScreenOnly | $.kCGWindowListExcludeDesktopElements,
-  $.kCGNullWindowID,
-);
-const windows = ObjC.castRefToObject(info);
+ObjC.import("AppKit");
+// Not in JXA's bridged set; declared by hand.
+ObjC.bindFunction("CGPreflightScreenCaptureAccess", ["bool", []]);
+const granted = $.CGPreflightScreenCaptureAccess();
 const out = [];
-for (let i = 0; i < windows.count; i++) {
-  const w = windows.objectAtIndex(i);
-  const owner = ObjC.unwrap(w.objectForKey("kCGWindowOwnerName")) || "";
-  if (!/roblox\\s*studio/i.test(owner)) continue;
-  const bounds = ObjC.deepUnwrap(w.objectForKey("kCGWindowBounds")) || {};
-  out.push({
-    id: ObjC.unwrap(w.objectForKey("kCGWindowNumber")),
-    title: ObjC.unwrap(w.objectForKey("kCGWindowName")) || "",
-    layer: ObjC.unwrap(w.objectForKey("kCGWindowLayer")),
-    width: bounds.Width || 0,
-    height: bounds.Height || 0,
-  });
+if (granted) {
+  const info = $.CGWindowListCopyWindowInfo(
+    $.kCGWindowListOptionOnScreenOnly | $.kCGWindowListExcludeDesktopElements,
+    $.kCGNullWindowID,
+  );
+  const windows = ObjC.castRefToObject(info);
+  for (let i = 0; i < windows.count; i++) {
+    const w = windows.objectAtIndex(i);
+    const pid = ObjC.unwrap(w.objectForKey("kCGWindowOwnerPID"));
+    const app = $.NSRunningApplication.runningApplicationWithProcessIdentifier(pid);
+    const bundle = app.isNil() ? "" : (ObjC.unwrap(app.bundleIdentifier) || "");
+    if (bundle !== "${STUDIO_BUNDLE_ID}") continue;
+    const bounds = ObjC.deepUnwrap(w.objectForKey("kCGWindowBounds")) || {};
+    out.push({
+      id: ObjC.unwrap(w.objectForKey("kCGWindowNumber")),
+      pid: pid,
+      title: ObjC.unwrap(w.objectForKey("kCGWindowName")) || "",
+      layer: ObjC.unwrap(w.objectForKey("kCGWindowLayer")),
+      width: bounds.Width || 0,
+      height: bounds.Height || 0,
+    });
+  }
 }
-JSON.stringify(out);
+JSON.stringify({ granted: granted, windows: out });
 `;
 
-type MacWindow = { id: number; title: string; layer: number; width: number; height: number };
+type MacWindow = { id: number; pid: number; title: string; layer: number; width: number; height: number };
 
 function runCommand(command: string, args: string[]): Promise<{ code: number; stdout: string; stderr: string }> {
   return new Promise((resolve, reject) => {
@@ -421,82 +496,103 @@ function runCommand(command: string, args: string[]): Promise<{ code: number; st
   });
 }
 
-// The Studio window to capture. Prefers one whose title contains `titleHint`
-// (the place name, for when several places are open), then the largest ordinary
-// window — Studio also owns small layer-0 panels and tooltips.
-export function pickStudioWindow(windows: MacWindow[], titleHint?: string): MacWindow | undefined {
-  const usable = windows.filter((w) => w.layer === 0 && w.width > 200 && w.height > 200);
-  const hint = (titleHint ?? '').trim().toLowerCase();
-  const named = hint
-    ? usable.filter((w) => w.title.toLowerCase().includes(hint))
-    : [];
-  const pool = named.length > 0 ? named : usable;
-  return pool.sort((a, b) => b.width * b.height - a.width * a.height)[0];
+// The helper's title rule: an empty hint matches any window; otherwise the title is the hint,
+// starts with it, or is a local file's absolute path whose basename is the hint.
+export function matchesStudioTitle(title: string, hint: string): boolean {
+  if (hint === '' || title === hint || title.startsWith(hint)) return true;
+  const suffix = ' - Roblox Studio';
+  if (!title.endsWith(suffix)) return false;
+  const place = title.slice(0, -suffix.length);
+  return place.startsWith('/') && path.posix.basename(place) === hint;
 }
 
-async function captureMacWindow(titleHint: string | undefined, outFile: string): Promise<HostWindowCapture> {
+// The one Studio window to capture, by the helper's rules, or why there is none.
+export function pickStudioWindow(windows: MacWindow[], titleHint?: string): MacWindow | string {
+  const hint = titleHint ?? '';
+  const candidates = windows.filter((w) =>
+    w.layer === 0 && w.width >= MIN_WINDOW_POINTS && w.height >= MIN_WINDOW_POINTS && matchesStudioTitle(w.title, hint));
+  if (candidates.length === 1) return candidates[0];
+  return candidates.length === 0
+    ? 'no visible Roblox Studio window matches the requested place title'
+    : 'multiple Roblox Studio windows match the requested place title; the capture is ambiguous';
+}
+
+async function captureMacWindowFallback(
+  titleHint: string | undefined,
+  expectedIdentity: HostWindowIdentity | undefined,
+  outFile: string,
+): Promise<HostWindowCapture> {
   const listed = await runCommand('/usr/bin/osascript', ['-l', 'JavaScript', '-e', MACOS_WINDOW_SCRIPT]);
   if (listed.code !== 0) {
     throw new Error(`could not list windows: ${(listed.stderr || listed.stdout).trim().slice(0, 400)}`);
   }
-  let windows: MacWindow[];
+  let report: { granted: boolean; windows: MacWindow[] };
   try {
-    windows = JSON.parse(listed.stdout.trim() || '[]') as MacWindow[];
+    report = JSON.parse(listed.stdout.trim()) as { granted: boolean; windows: MacWindow[] };
   } catch {
     throw new Error(`could not read the window list: ${listed.stdout.trim().slice(0, 200)}`);
   }
-  const target = pickStudioWindow(windows, titleHint);
-  if (!target) {
-    throw new Error(
-      windows.length === 0
-        ? 'no Roblox Studio window found; if Studio is open, this server needs Screen Recording permission to see it'
-        : 'no usable Roblox Studio window found (only panels and tooltips)',
-    );
+  // Never request or bypass Screen Recording permission from an MCP call.
+  if (!report.granted) {
+    throw new Error('macOS Screen Recording permission is not granted to the MCP host. Enable it in System Settings > Privacy & Security > Screen Recording, then restart the MCP host.');
+  }
+  const target = pickStudioWindow(report.windows, titleHint);
+  if (typeof target === 'string') throw new Error(target);
+  const identity: HostWindowIdentity = { windowId: target.id, processId: target.pid, bundleIdentifier: STUDIO_BUNDLE_ID };
+  if (expectedIdentity && (identity.windowId !== expectedIdentity.windowId || identity.processId !== expectedIdentity.processId ||
+      identity.bundleIdentifier !== expectedIdentity.bundleIdentifier)) {
+    throw new Error('the selected Roblox Studio window identity changed between captures');
   }
 
-  // -x is no shutter sound, -o drops the window shadow so the frame is the
-  // window itself.
+  // -x is no shutter sound, -o drops the window shadow so the frame is the window itself.
   const shot = await runCommand('/usr/sbin/screencapture', ['-x', '-o', '-l', String(target.id), '-t', 'png', outFile]);
   if (shot.code !== 0 || !fs.existsSync(outFile)) {
     throw new Error(`screencapture failed: ${(shot.stderr || shot.stdout).trim().slice(0, 400) || `exit ${shot.code}`}`);
   }
   const decoded = decodeScreenshotPathToRgba(outFile);
-  return { width: decoded.width, height: decoded.height, rgba: decoded.rgba, title: target.title };
+  return { width: decoded.width, height: decoded.height, rgba: decoded.rgba, title: target.title, identity };
 }
 
-// Captures the Studio window's client area as RGBA. `titleHint` is the place
+async function captureMacStudio(titleHint?: string, expectedIdentity?: HostWindowIdentity): Promise<HostCaptureResult> {
+  // ScreenCaptureKit first. Its refusals (no permission, no window, an ambiguous one, a changed
+  // identity) are answers, not failures, and are returned as they are.
+  let unavailable = await macHelperProblem();
+  if (unavailable === undefined) {
+    const primary = await captureMacStudioWindow(titleHint, expectedIdentity);
+    if (primary.ok || !/requires macOS 14/.test(primary.error)) return primary;
+    unavailable = primary.error;
+  }
+  const outFile = path.join(os.tmpdir(), `robloxstudio-mcp-capture-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}.png`);
+  try {
+    const capture = await captureMacWindowFallback(titleHint, expectedIdentity, outFile);
+    if (isUniformFrame(capture.rgba, capture.width, capture.height)) {
+      return { ok: false, error: 'the captured Studio window had no content in it (screencapture fallback)' };
+    }
+    return { ok: true, capture };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return { ok: false, error: `${message} (screencapture fallback; the ScreenCaptureKit helper is unavailable: ${unavailable.slice(0, 300)})` };
+  } finally {
+    fs.rmSync(outFile, { force: true });
+  }
+}
+
+// Captures the Studio window (the client area on Windows) as RGBA. `titleHint` is the place
 // name shown in the window title (used to pick among several open places).
-export async function captureStudioWindow(titleHint?: string): Promise<HostCaptureResult> {
+export async function captureStudioWindow(titleHint?: string, expectedIdentity?: HostWindowIdentity): Promise<HostCaptureResult> {
   if (isHostCaptureDisabled()) {
     return { ok: false, error: 'host window capture is disabled by ROBLOX_STUDIO_HOST_CAPTURE' };
   }
   if (!isHostCaptureSupported()) {
     return { ok: false, error: hostCaptureUnsupportedReason() };
   }
-  if (process.platform === 'darwin') {
-    const outFile = path.join(os.tmpdir(), `robloxstudio-mcp-capture-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}.png`);
-    try {
-      const capture = await captureMacWindow(titleHint, outFile);
-      if (isUniformFrame(capture.rgba, capture.width, capture.height)) {
-        return {
-          ok: false,
-          error: 'the captured Studio window had no content in it; this server needs Screen Recording permission on macOS',
-        };
-      }
-      return { ok: true, capture };
-    } catch (error) {
-      return { ok: false, error: error instanceof Error ? error.message : String(error) };
-    } finally {
-      fs.rmSync(outFile, { force: true });
-    }
-  }
+  if (process.platform === 'darwin') return captureMacStudio(titleHint, expectedIdentity);
   const outFile = path.join(os.tmpdir(), `robloxstudio-mcp-capture-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}.bgra`);
   try {
-    const report = await runWindowsCapture(titleHint, outFile);
-    if (!report.ok || !report.width || !report.height || !report.stride) {
-      return { ok: false, error: report.error ?? 'host window capture returned no image' };
-    }
+    const report = parseWindowsCaptureReport(await runWindowsCapture(titleHint, outFile, expectedIdentity), expectedIdentity);
+    if (!report.ok) return report;
     const raw = fs.readFileSync(outFile);
+    if (raw.length !== report.stride * report.height) throw new Error('Windows capture returned an invalid BGRA byte count');
     const { width, height, stride } = report;
     const rgba = Buffer.alloc(width * height * 4);
     for (let y = 0; y < height; y++) {
@@ -511,7 +607,7 @@ export async function captureStudioWindow(titleHint?: string): Promise<HostCaptu
         rgba[d + 3] = 255;
       }
     }
-    return { ok: true, capture: { width, height, rgba, title: report.title ?? '' } };
+    return { ok: true, capture: { width, height, rgba, title: report.title, identity: report.identity } };
   } catch (error) {
     return { ok: false, error: error instanceof Error ? error.message : String(error) };
   } finally {

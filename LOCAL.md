@@ -4,8 +4,24 @@ Fork of [chrrxs/robloxstudio-mcp](https://github.com/chrrxs/robloxstudio-mcp) (M
 upstream changes are reviewed and adopted deliberately rather than pulled automatically by
 `npx @latest`. Forked at **v3.1.5**.
 
-This fork carries **no source changes** yet. It exists for control over when upstream code runs,
-not to fix a bug. Keep it that way if you can: an unmodified fork merges cleanly.
+It exists for control over when upstream code runs. Keep local changes few and small: every one
+is a conflict waiting at the next merge. What this fork carries on top of upstream:
+
+- **The framework's lessons** (`get_core_lessons`), served from the MCP.
+- **A screencapture fallback for macOS host capture** (`packages/core/src/host-capture.ts`).
+  Upstream's primary path is a ScreenCaptureKit helper compiled on first use with `xcrun swiftc`
+  (about 25 seconds, once per server launch; then under a second a capture). It needs the Xcode
+  command-line tools and macOS 14. Where it cannot be built or run, the fallback captures with
+  `screencapture -l` under the helper's own rules: Screen Recording permission checked and never
+  requested, exactly one Studio window matching the place title (it also skips Studio windows
+  under 200 points, which the helper does not), and the same window identity. The helper's own
+  refusals are never overridden. It began as this fork's own macOS capture, before upstream had
+  one; merged with upstream's in September 2026.
+
+Known on macOS, before and after that merge: `tests/studio-test-snapshot.mjs` and
+`tests/studio-install-repair.mjs` fail, because the Studio test harness they cover is written for
+Windows (`/var` is a link to `/private/var` there, and the snapshot test expects Windows' handling of
+case-colliding names). `npm test` stops at the first, so run the later stages on their own.
 
 ## How Claude Code runs it
 

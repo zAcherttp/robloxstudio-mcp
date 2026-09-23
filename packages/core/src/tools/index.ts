@@ -29,9 +29,13 @@ import {
   captureStudioWindow,
   cropToViewport,
   findViewportRect,
+  hostCaptureUnsupportedReason,
+  isHostCaptureDisabled,
+  isHostCaptureSupported,
   isUniformFrame,
+  prepareHostWindowCapture,
 } from '../host-capture.js';
-import type { HostCaptureResult, ViewportRect } from '../host-capture.js';
+import type { HostCaptureResult, HostWindowIdentity, ViewportRect } from '../host-capture.js';
 import * as fs from 'fs';
 import * as path from 'path';
 
@@ -53,6 +57,7 @@ type RawImageCaptureResponse = {
 
 type HostViewportRectCacheEntry = {
   rect: ViewportRect;
+  identity?: HostWindowIdentity;
   windowWidth: number;
   windowHeight: number;
   viewportWidth: number;
@@ -75,8 +80,13 @@ type HostViewportCaptureResult =
   | { success: true; response: RawImageCaptureResponse }
   | { success: false; error: string };
 
-// Injection seam so tests can stand in for the PowerShell helper.
-export type HostWindowCaptureFn = (titleHint?: string) => Promise<HostCaptureResult>;
+// Injection seam so tests can stand in for the host OS helper.
+export type HostWindowCaptureFn = (titleHint?: string, expectedIdentity?: HostWindowIdentity) => Promise<HostCaptureResult>;
+
+function sameHostWindowIdentity(actual: HostWindowIdentity | undefined, expected: HostWindowIdentity): boolean {
+  return actual?.windowId === expected.windowId && actual.processId === expected.processId
+    && actual.bundleIdentifier === expected.bundleIdentifier;
+}
 
 // A cached viewport position is trusted only briefly: Studio's dock layout can
 // change without the window or viewport size changing (e.g. swapping two
@@ -98,9 +108,12 @@ type EncodedViewportCapture = {
   data: string;
   mimeType: string;
   message: string;
+  source?: string;
+  studioFastPathUnavailable?: string;
 } | {
   success: false;
   error: string;
+  studioFastPathUnavailable?: string;
 };
 
 type DeviceSimulatorSettings = {
@@ -1259,8 +1272,8 @@ export class RobloxStudioTools {
     return this._requestPeer(endpoint, data, resolved.targetPeerId, timeoutMs, signal, operationId);
   }
 
-  // Prefer the first client role in the selected process/group scope for live
-  // viewport and input operations; otherwise retain the default Peer's Instance.
+  // Honor an explicitly selected client for viewport/input operations; otherwise
+  // prefer the first client in the scope, then retain the default Peer's Instance.
   private _resolveRuntime(instance_id?: string): { instanceId: string; clientRole?: string } {
     const resolved = this.bridge.resolveTarget({ instance_id, target: undefined });
     if (!resolved.ok) throw new RoutingFailure(resolved.error);
@@ -1271,8 +1284,13 @@ export class RobloxStudioTools {
         data: this._routingErrorData(),
       });
     }
-    const client = this.bridge.getPeersInScope(resolved.targetInstanceId)
-      .filter((peer) => /^client-\d+$/.test(peer.role))
+    const clients = this.bridge.getPeersInScope(resolved.targetInstanceId)
+      .filter((peer) => /^client-\d+$/.test(peer.role));
+    // Generic routing selects a group scope. Preserve a client process/role alias
+    // supplied by the caller before applying the scope's default client.
+    const selectedClients = clients.filter((peer) =>
+      instance_id === peer.instanceId || instance_id === `${peer.instanceId}-${peer.role}`);
+    const client = selectedClients.length === 1 ? selectedClients[0] : clients
       .sort((a, b) => a.role.localeCompare(b.role) || a.peerId.localeCompare(b.peerId))[0];
     return {
       instanceId: client?.instanceId ?? resolved.targetInstanceId,
@@ -5134,6 +5152,7 @@ export class RobloxStudioTools {
     const studioFastPathMissing =
       response.unavailable !== undefined ||
       (response.error?.includes('/api/capture-studio') ?? false);
+    const studioFastPathUnavailable = studioFastPathMissing ? response.unavailable ?? response.error : undefined;
 
     if (studioFastPathMissing) {
       if (targetRole.startsWith('client-')) {
@@ -5144,16 +5163,17 @@ export class RobloxStudioTools {
         // allowed to promote it into a readable EditableImage.
         const begin = await this._callSingle('/api/capture-begin', {}, targetRole, instanceId) as { contentId?: string; error?: string };
         if (begin.error) {
-          return { success: false, error: begin.error };
+          response = { error: begin.error };
+        } else if (!begin.contentId) {
+          response = { error: 'Screenshot capture failed: no content id returned from client.' };
+        } else {
+          response = await this._callSingle('/api/capture-read', { contentId: begin.contentId }, 'edit', instanceId) as RawImageCaptureResponse;
         }
-        if (!begin.contentId) {
-          return { success: false, error: 'Screenshot capture failed: no content id returned from client.' };
-        }
-        response = await this._callSingle('/api/capture-read', { contentId: begin.contentId }, 'edit', instanceId) as RawImageCaptureResponse;
       } else {
         // Edit mode: capture and read back in the same (edit) context.
         response = await this._callSingle('/api/capture-screenshot', {}, 'edit', instanceId) as RawImageCaptureResponse;
       }
+      response.source ??= 'CaptureService';
     }
 
     // Studio-side capture can come back unusable for the play viewport even
@@ -5168,7 +5188,7 @@ export class RobloxStudioTools {
       hostReason = response.error
         ? `Studio's capture failed (${response.error})`
         : this._isUniformCaptureResponse(response)
-          ? "Studio's CaptureService returned a blank (single-colour) frame"
+          ? `Studio's ${response.source ?? 'capture'} returned a blank (single-colour) frame`
           : undefined;
     } catch (error) {
       response = { ...response, error: `Could not decode Studio's screenshot: ${error instanceof Error ? error.message : String(error)}` };
@@ -5199,7 +5219,7 @@ export class RobloxStudioTools {
           'works because the temporary rbxtemp:// handle is readable from the edit process; multiplayer client handles ' +
           `appear to be scoped to the client process. Raw error: ${response.error}`;
       }
-      return { success: false, error: text };
+      return { success: false, error: text, studioFastPathUnavailable };
     }
 
     const w = response.width;
@@ -5284,6 +5304,8 @@ export class RobloxStudioTools {
       data: buffer.toString('base64'),
       mimeType,
       message,
+      source: response.source,
+      studioFastPathUnavailable,
     };
   }
 
@@ -5315,6 +5337,23 @@ export class RobloxStudioTools {
     instanceId: string,
     targetRole: string,
   ): Promise<HostViewportCaptureResult> {
+    // Avoid changing simulator scaling or drawing markers when no host capture
+    // can run. The OS helper's own guard is otherwise reached only after show.
+    if (isHostCaptureDisabled()) {
+      return { success: false, error: 'host window capture is disabled by ROBLOX_STUDIO_HOST_CAPTURE' };
+    }
+    if (!isHostCaptureSupported()) {
+      return { success: false, error: hostCaptureUnsupportedReason() };
+    }
+    // Cold Swift compilation must finish before the plugin starts its bounded
+    // marker transaction. Injected backends need no host helper preparation.
+    if (this.hostWindowCapture === captureStudioWindow) {
+      try {
+        await prepareHostWindowCapture();
+      } catch (error) {
+        return { success: false, error: `could not prepare host capture: ${error instanceof Error ? error.message : String(error)}` };
+      }
+    }
     let prepared: ViewportMarkerResponse | undefined;
     let result: HostViewportCaptureResult;
     try {
@@ -5380,8 +5419,11 @@ export class RobloxStudioTools {
       cached.viewportWidth === viewportWidth &&
       cached.viewportHeight === viewportHeight
     ) {
-      const grab = await this.hostWindowCapture(titleHint);
+      const grab = await this.hostWindowCapture(titleHint, cached.identity);
       if (!grab.ok) return { success: false, error: grab.error };
+      if (cached.identity !== undefined && !sameHostWindowIdentity(grab.capture.identity, cached.identity)) {
+        return { success: false, error: 'the Studio window identity changed since locating the viewport; retry the capture' };
+      }
       if (grab.capture.width === cached.windowWidth && grab.capture.height === cached.windowHeight) {
         return {
           success: true,
@@ -5418,21 +5460,24 @@ export class RobloxStudioTools {
     });
     if ('error' in located) return { success: false, error: located.error };
 
+    const cleanGrab = await this.hostWindowCapture(titleHint, markerGrab.capture.identity);
+    if (!cleanGrab.ok) return { success: false, error: cleanGrab.error };
+    if (markerGrab.capture.identity !== undefined && !sameHostWindowIdentity(cleanGrab.capture.identity, markerGrab.capture.identity)) {
+      return { success: false, error: 'the Studio window identity changed while locating the viewport; retry the capture' };
+    }
+    if (cleanGrab.capture.width !== markerGrab.capture.width || cleanGrab.capture.height !== markerGrab.capture.height) {
+      this.hostViewportRects.delete(cacheKey);
+      return { success: false, error: 'the Studio window was resized while locating the viewport; retry the capture' };
+    }
     this.hostViewportRects.set(cacheKey, {
       rect: located.rect,
+      identity: markerGrab.capture.identity,
       windowWidth: markerGrab.capture.width,
       windowHeight: markerGrab.capture.height,
       viewportWidth,
       viewportHeight,
       cachedAt: Date.now(),
     });
-
-    const cleanGrab = await this.hostWindowCapture(titleHint);
-    if (!cleanGrab.ok) return { success: false, error: cleanGrab.error };
-    if (cleanGrab.capture.width !== markerGrab.capture.width || cleanGrab.capture.height !== markerGrab.capture.height) {
-      this.hostViewportRects.delete(cacheKey);
-      return { success: false, error: 'the Studio window was resized while locating the viewport; retry the capture' };
-    }
     return {
       success: true,
       response: this._hostResponseFromCrop(cleanGrab.capture.rgba, cleanGrab.capture.width, cleanGrab.capture.height, located.rect, viewportWidth, viewportHeight),
@@ -5466,7 +5511,7 @@ export class RobloxStudioTools {
     const { instanceId, clientRole } = this._resolveRuntime(instance_id);
     const capture = await this._captureViewportImage(instanceId, clientRole ?? 'edit', format, quality);
     if (!capture.success) {
-      return this._textResult({ error: capture.error });
+      return this._textResult({ error: capture.error, studioFastPathUnavailable: capture.studioFastPathUnavailable });
     }
 
     return {
@@ -5480,6 +5525,8 @@ export class RobloxStudioTools {
             mimeType: capture.mimeType,
             ...(capture.quality === undefined ? {} : { quality: capture.quality }),
             message: capture.message,
+            source: capture.source,
+            studioFastPathUnavailable: capture.studioFastPathUnavailable,
           }),
         },
         {
