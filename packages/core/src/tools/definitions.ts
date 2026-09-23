@@ -1023,6 +1023,42 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
     }
   },
   {
+    name: 'capture_heap_snapshot',
+    // Not 'read': it runs Luau on the peer through execute_luau, which the read-only Inspector
+    // must never reach.
+    category: 'write',
+    description: 'Use to find what holds Luau memory on a play peer, or what grew since an earlier snapshot.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        target: {
+          type: 'string',
+          pattern: '^(server|client-[0-9]+)$',
+          description: 'Running server or client-N; edit is invalid.'
+        },
+        output_path: {
+          type: 'string',
+          description: 'Snapshot JSON file; defaults to the temp directory.'
+        },
+        compare_path: {
+          type: 'string',
+          description: 'Earlier snapshot file to compare with.'
+        },
+        top: {
+          type: 'number',
+          default: 10,
+          minimum: 1,
+          maximum: 50,
+          description: 'Rows per section.'
+        },
+        instance_id: {
+          type: 'string',
+          description: 'Studio process ID when ambiguous.'
+        }
+      }
+    }
+  },
+  {
     name: 'capture_micro_profiler',
     category: 'read',
     description: 'Use to profile engine and game frame time on a live peer.',

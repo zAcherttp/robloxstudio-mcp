@@ -308,6 +308,7 @@ describe('Tool schema compatibility', () => {
       multiplayer_playtest: 'multiplayerPlaytest',
       get_runtime_logs: 'getRuntimeLogs',
       capture_script_profiler: 'captureScriptProfiler',
+      capture_heap_snapshot: 'captureHeapSnapshot',
       capture_micro_profiler: 'captureMicroProfiler',
       breakpoints: 'breakpoints',
       insert_asset: 'insertAsset',

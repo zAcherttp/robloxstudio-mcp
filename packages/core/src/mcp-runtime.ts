@@ -74,6 +74,7 @@ const SIDE_EFFECTING_READ_TOOLS = new Set([
 ]);
 const NON_DESTRUCTIVE_SIDE_EFFECT_TOOLS = new Set([
   'capture_device_matrix',
+  'capture_heap_snapshot',
   'generate_model',
   'import_rbxm',
   'insert_asset',

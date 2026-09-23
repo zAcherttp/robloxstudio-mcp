@@ -37,7 +37,22 @@ import {
 } from '../host-capture.js';
 import type { HostCaptureResult, HostWindowIdentity, ViewportRect } from '../host-capture.js';
 import * as fs from 'fs';
+import * as os from 'os';
 import * as path from 'path';
+import {
+  compareHeapSnapshots,
+  heapCaptureScript,
+  heapChunkScript,
+  heapReleaseScript,
+  parseHeapChunk,
+  parseHeapSnapshot,
+  summarizeHeapSnapshot,
+} from '../heap-snapshot.js';
+
+// capture_heap_snapshot: how long the engine gets to produce a report, and how much of it one
+// execute_luau reply carries.
+const HEAP_CAPTURE_TIMEOUT_MS = 60_000;
+const HEAP_CHUNK_BYTES = 200_000;
 
 type RawImageCaptureResponse = {
   success?: boolean;
@@ -2915,6 +2930,75 @@ export class RobloxStudioTools {
     }
 
     return { content: [{ type: 'text', text: JSON.stringify(body) }] };
+  }
+
+  // A Luau heap snapshot of one play peer, through execute_luau (which runs as the plugin: the
+  // eval tools lack the Plugin capability HeapProfilerService needs). The report is several
+  // hundred KB, so it stays on the peer and is read back in chunks, written to a file, and only
+  // its summary returned; compare_path adds the difference from an earlier snapshot file.
+  async captureHeapSnapshot(target?: string, request: Record<string, unknown> = {}, instance_id?: string) {
+    const targetRole = target ?? 'server';
+    if (!/^(server|client-[0-9]+)$/.test(targetRole)) {
+      throw new Error('capture_heap_snapshot needs target="server" or "client-N": only a running play peer has a heap to report.');
+    }
+    const { output_path: outputPath, compare_path: comparePath, top } = request;
+    if (outputPath !== undefined && typeof outputPath !== 'string') throw new Error('output_path must be a string when provided');
+    if (comparePath !== undefined && typeof comparePath !== 'string') throw new Error('compare_path must be a string when provided');
+    if (top !== undefined && (typeof top !== 'number' || !Number.isInteger(top) || top < 1 || top > 50)) {
+      throw new Error('top must be an integer from 1 to 50 when provided');
+    }
+    const limit = (top as number | undefined) ?? 10;
+    const before = comparePath ? parseHeapSnapshot(fs.readFileSync(path.resolve(comparePath), 'utf8')) : undefined;
+
+    const run = async (code: string, timeoutMs?: number): Promise<string> => {
+      const response = await this._callSingle('/api/execute-luau', { code }, targetRole, instance_id, timeoutMs);
+      const reply = response as { success?: boolean; returnValue?: unknown; error?: unknown; message?: unknown };
+      if (!reply || reply.success !== true) {
+        const why = reply?.error ?? reply?.message ?? JSON.stringify(response).slice(0, 300);
+        throw new Error(`capture_heap_snapshot failed on ${targetRole}: ${String(why)}`);
+      }
+      return typeof reply.returnValue === 'string' ? reply.returnValue : String(reply.returnValue ?? '');
+    };
+
+    const key = `__mcp_heap_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+    let raw = '';
+    let bytes = 0;
+    try {
+      bytes = Number(await run(heapCaptureScript(key), HEAP_CAPTURE_TIMEOUT_MS));
+      if (!Number.isSafeInteger(bytes) || bytes <= 0) throw new Error(`capture_heap_snapshot got no report from ${targetRole}`);
+      const parts: string[] = [];
+      for (let from = 1; from <= bytes;) {
+        const chunk = parseHeapChunk(await run(heapChunkScript(key, from, from + HEAP_CHUNK_BYTES - 1)));
+        if (chunk.last < from) throw new Error('capture_heap_snapshot read an empty chunk');
+        parts.push(chunk.text);
+        from = chunk.last + 1;
+      }
+      raw = parts.join('');
+    } finally {
+      await run(heapReleaseScript(key)).catch(() => undefined);
+    }
+    if (Buffer.byteLength(raw, 'utf8') !== bytes) {
+      throw new Error(`capture_heap_snapshot read ${Buffer.byteLength(raw, 'utf8')} of ${bytes} bytes; retry`);
+    }
+    const snapshot = parseHeapSnapshot(raw);
+
+    const file = path.resolve(typeof outputPath === 'string' && outputPath !== ''
+      ? outputPath
+      : path.join(os.tmpdir(), 'robloxstudio-mcp-heap', `${targetRole}-${new Date().toISOString().replace(/[:.]/g, '-')}.json`));
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, raw, 'utf8');
+
+    const result: Record<string, unknown> = {
+      target: targetRole,
+      output_path: file,
+      snapshot_bytes: bytes,
+      summary: summarizeHeapSnapshot(snapshot, limit),
+    };
+    if (before && typeof comparePath === 'string') {
+      result.compare_path = path.resolve(comparePath);
+      result.comparison = compareHeapSnapshots(before, snapshot, limit);
+    }
+    return { content: [{ type: 'text', text: JSON.stringify(result) }] };
   }
 
   async captureMicroProfiler(target?: string, request: Record<string, unknown> = {}, instance_id?: string) {

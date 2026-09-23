@@ -64,6 +64,7 @@ Read output with get_runtime_logs. Reuse nextCursor as cursor for one Instance, 
 - breakpoints requires Studio's Script Editor API beta feature. Logpoints normally use continue_execution=true. A pausing breakpoint with continue_execution=false needs an OnStopped resume handler.
 - breakpoints clear removes only MCP-created breakpoints unless clear_all is true. clear_all also removes user-created breakpoints.
 - capture_script_profiler ranks Luau functions by CPU time. Use output_path when the raw capture is needed.
+- capture_heap_snapshot reports what holds Luau memory on a play peer and writes the full snapshot to output_path. For a leak, snapshot before and after the suspected action and pass the first file as compare_path.
 - capture_micro_profiler attributes frame time across engine and game work. Its rows are inclusive or cumulative views, so do not sum them as disjoint totals.
 - Use baseline_path or baseline for before-and-after MicroProfiler comparisons.
 - Use get_memory_breakdown for memory categories and get_scene_analysis for instance, script, triangle, animation, or audio cost.
