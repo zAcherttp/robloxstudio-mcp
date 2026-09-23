@@ -124,6 +124,7 @@ function decodeMessage(payload: string): DecodedEvent | undefined {
 			knownPeer: envelope.knownPeer,
 			mcpConnected: envelope.mcpConnected,
 			serverVersion: typeIs(envelope.serverVersion, "string") ? envelope.serverVersion : undefined,
+			serverBuild: typeIs(envelope.serverBuild, "string") ? envelope.serverBuild : undefined,
 			pluginVersion: typeIs(envelope.pluginVersion, "string") ? envelope.pluginVersion : undefined,
 			pluginVariant: typeIs(envelope.pluginVariant, "string") ? envelope.pluginVariant : undefined,
 		};

@@ -23,6 +23,34 @@ interface UIElements {
 	troubleshootLabel: TextLabel;
 	updateBanner: Frame;
 	updateBannerText: TextLabel;
+	creditsLabel: TextLabel;
+}
+
+// Fork: the credit line shows which commit the plugin and the server were each built from, and
+// turns amber when they differ (scripts/stamp-build.mjs). The part before the build time is the
+// commit, with a + when the tree had uncommitted changes.
+// An unstamped build still holds the placeholder; it is spotted by its leading underscores, because
+// the build script replaces the placeholder's own spelling everywhere, including here.
+function isStamped(build: string | undefined): build is string {
+	return build !== undefined && build !== "" && build.sub(1, 2) !== "__";
+}
+
+function buildSource(build: string | undefined): string | undefined {
+	if (!isStamped(build)) return undefined;
+	const [source] = build.split(" ");
+	return source;
+}
+
+function creditsText(): string {
+	const plugin = isStamped(State.CURRENT_BUILD) ? State.CURRENT_BUILD : "unstamped";
+	const server = State.getServerBuild();
+	const pluginSource = buildSource(State.CURRENT_BUILD);
+	const serverSource = buildSource(server);
+	const differ = pluginSource !== undefined && serverSource !== undefined && pluginSource !== serverSource;
+	const colour = differ ? "#FFB347" : "#CCCCCC";
+	const serverText = server ?? "not reported";
+	const note = differ ? ' <font color="#FFB347">(different builds)</font>' : "";
+	return `<font color="#999999">zAcherttp fork</font> <font color="${colour}">plugin ${plugin} · server ${serverText}</font>${note}`;
 }
 
 let elements: UIElements = undefined!;
@@ -177,7 +205,7 @@ function init(pluginRef: Plugin) {
 	creditsLabel.Position = new UDim2(0, 10, 0, 23);
 	creditsLabel.BackgroundTransparency = 1;
 	creditsLabel.RichText = true;
-	creditsLabel.Text = '<font color="#999999">github</font> <font color="#CCCCCC">Chrrxs/robloxstudio-mcp</font>';
+	creditsLabel.Text = creditsText();
 	creditsLabel.TextColor3 = C.muted;
 	creditsLabel.TextSize = 8;
 	creditsLabel.Font = Enum.Font.GothamMedium;
@@ -459,6 +487,7 @@ function init(pluginRef: Plugin) {
 
 
 	elements = {
+		creditsLabel,
 		screenGui, mainFrame, contentFrame, statusLabel, detailStatusLabel,
 		statusIndicator, statusPulse, statusText, connectButton, connectStroke,
 		urlInput, step1Dot, step1Label, step2Dot, step2Label, step3Dot, step3Label,
@@ -471,6 +500,7 @@ function updateUIState() {
 	const conn = State.getActiveConnection();
 	if (!conn) return;
 	const el = elements;
+	el.creditsLabel.Text = creditsText();
 	const diagnostics = State.getTransportDiagnostics(tick());
 
 	if (!conn.isActive) {

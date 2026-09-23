@@ -1,6 +1,10 @@
 import type { Connection, TransportUpdate } from "../types";
 
 const CURRENT_VERSION = "__VERSION__";
+// Fork: the commit and time this plugin was built from (scripts/stamp-build.mjs).
+const CURRENT_BUILD = "__BUILD__";
+// The server's, from its status messages; shown beside the plugin's own.
+let serverBuild: string | undefined;
 const PLUGIN_VARIANT = "__PLUGIN_VARIANT__";
 const BASE_PORT = 58741;
 const SENSITIVE_DIAGNOSTIC_TERMS = ["token", "authorization", "bearer", "password", "cookie", "secret"];
@@ -107,6 +111,11 @@ function getTransportDiagnostics(now: number): { status: string; detail: string 
 
 export = {
 	CURRENT_VERSION,
+	CURRENT_BUILD,
+	getServerBuild: () => serverBuild,
+	setServerBuild: (build: string | undefined) => {
+		serverBuild = build;
+	},
 	PLUGIN_VARIANT,
 	BASE_PORT,
 	getActiveConnection,

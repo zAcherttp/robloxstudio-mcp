@@ -8,6 +8,18 @@ It exists for control over when upstream code runs. Keep local changes few and s
 is a conflict waiting at the next merge. What this fork carries on top of upstream:
 
 - **The framework's lessons** (`get_core_lessons`), served from the MCP.
+- **`capture_heap_snapshot`** (`packages/core/src/heap-snapshot.ts`): a Luau heap snapshot of a
+  play server or client, written to a file, with a summary of what holds memory and, given an
+  earlier file, what grew. It runs through `execute_luau`, which runs as the plugin: the eval
+  tools lack the Plugin capability `HeapProfilerService` needs. The report stays on the peer and is
+  read back in 200 KB chunks that end on UTF-8 boundaries. Category `write`, so the read-only
+  Inspector cannot reach `execute_luau` through it; it raised the catalog budget test to 50 tools
+  and 45,000 characters.
+- **A build stamp** (`scripts/stamp-build.mjs`): `npm run build` and `npm run build:plugin` each
+  record the commit they were built from (`+` for uncommitted changes) and when. The plugin panel's
+  credit line shows the plugin's stamp and the server's side by side, amber when they differ. The
+  server reads `build-info.json` (gitignored) at startup and sends it with its status. Touches the
+  root `build` script, `build-plugin.mjs`, the status event and the panel's credit line.
 - **A screencapture fallback for macOS host capture** (`packages/core/src/host-capture.ts`).
   Upstream's primary path is a ScreenCaptureKit helper compiled on first use with `xcrun swiftc`
   (about 25 seconds, once per server launch; then under a second a capture). It needs the Xcode

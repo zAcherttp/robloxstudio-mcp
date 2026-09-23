@@ -41,11 +41,19 @@ if (installBundledOnly || installWithFallback) {
 
   const require = createRequire(import.meta.url);
   const { version: VERSION } = require('../package.json');
+  // Fork: the build stamp npm run build wrote at the repo root (scripts/stamp-build.mjs).
+  let BUILD: string | undefined;
+  try {
+    BUILD = (require('../../../build-info.json') as { label?: string }).label;
+  } catch {
+    BUILD = undefined;
+  }
 
   const server = new RobloxStudioMCPServer({
     name: 'robloxstudio-mcp',
     version: VERSION,
     tools: getAllTools(),
+    build: BUILD,
   });
 
   server.run().catch((error) => {

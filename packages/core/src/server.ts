@@ -14,6 +14,8 @@ export interface ServerConfig {
   name: string;
   version: string;
   tools: ToolDefinition[];
+  // Fork: the commit and time this server was built from (scripts/stamp-build.mjs).
+  build?: string;
 }
 
 export class RobloxStudioMCPServer {

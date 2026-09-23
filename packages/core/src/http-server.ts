@@ -45,6 +45,7 @@ interface StreamableHttpConfig {
   name: string;
   version: string;
   tools: ToolDefinition[];
+  build?: string;
 }
 
 // Explicit wire endpoints: public tool names do not always match Studio handlers.
@@ -372,6 +373,7 @@ export function createHttpServer(tools: RobloxStudioTools, bridge: BridgeService
       knownPeer,
       mcpConnected: isMCPServerActive(),
       serverVersion: serverConfig?.version,
+      serverBuild: serverConfig?.build,
       pluginVersion: peer?.pluginVersion,
       pluginVariant: peer?.pluginVariant,
     };
@@ -546,6 +548,7 @@ export function createHttpServer(tools: RobloxStudioTools, bridge: BridgeService
       serverName: serverConfig?.name ?? 'robloxstudio-mcp',
       version: serverConfig?.version,
       serverVersion: serverConfig?.version,
+      serverBuild: serverConfig?.build,
       capabilities: studioLifecycleCallable ? {
         studioLifecycle: {
           protocolVersion: 3,

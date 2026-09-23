@@ -60,6 +60,8 @@ export interface StudioStatusEvent {
   knownPeer: boolean;
   mcpConnected: boolean;
   serverVersion?: string;
+  // Fork: which commit the server was built from, shown beside the plugin's own.
+  serverBuild?: string;
   pluginVersion?: string;
   pluginVariant?: string;
 }

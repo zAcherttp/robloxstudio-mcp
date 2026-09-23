@@ -84,6 +84,7 @@ export interface StudioStatusEvent {
 	knownPeer: boolean;
 	mcpConnected: boolean;
 	serverVersion?: string;
+	serverBuild?: string;
 	pluginVersion?: string;
 	pluginVariant?: string;
 }

@@ -10,7 +10,7 @@
     "packages/*"
   ],
   "scripts": {
-    "build": "npm run build -w packages/core && npm run build -w packages/robloxstudio-mcp && npm run build -w packages/robloxstudio-mcp-inspector",
+    "build": "node scripts/stamp-build.mjs && npm run build -w packages/core && npm run build -w packages/robloxstudio-mcp && npm run build -w packages/robloxstudio-mcp-inspector",
     "compile:plugin": "npm --prefix studio-plugin run build",
     "build:plugin": "npm run compile:plugin && node scripts/build-plugin.mjs",
     "build:plugin:artifact": "npm run compile:plugin && node scripts/build-plugin.mjs --build-only",

@@ -154,6 +154,7 @@ function handleStatus(status: StudioStatusEvent): void {
 	if (!conn.isActive) return;
 	conn.lastHttpOk = true;
 	conn.lastMcpOk = status.mcpConnected;
+	State.setServerBuild(status.serverBuild);
 	conn.consecutiveFailures = 0;
 	conn.currentRetryDelay = 0.5;
 	if (status.mcpConnected) {

@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+import { buildStamp } from './stamp-build.mjs';
 import {
   readFileSync,
   readdirSync,
@@ -20,6 +21,8 @@ import { randomUUID } from 'crypto';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const rootDir = join(__dirname, '..');
 const { version: VERSION } = JSON.parse(readFileSync(join(rootDir, 'package.json'), 'utf8'));
+// Fork: which commit this plugin was built from (scripts/stamp-build.mjs).
+const BUILD_STAMP = buildStamp();
 const pluginDir = join(rootDir, 'studio-plugin');
 const outDir = join(pluginDir, 'out');
 const serverDir = join(outDir, 'server');
@@ -71,6 +74,7 @@ function escapeCdata(source) {
 function injectVersion(source) {
   return source
     .replace(/__VERSION__/g, VERSION)
+    .replace(/__BUILD__/g, BUILD_STAMP.label)
     .replace(/__PLUGIN_VARIANT__/g, variantName)
     .replace(/__TOOLBAR_NAME__/g, variant.toolbarName)
     .replace(/__BUTTON_TITLE__/g, variant.buttonTitle)
