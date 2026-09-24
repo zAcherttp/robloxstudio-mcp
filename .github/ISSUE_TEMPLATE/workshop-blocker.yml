@@ -1,0 +1,50 @@
+name: Workshop blocker
+description: Stuck during the workshop or while setting up. One issue per problem.
+title: "Blocked: "
+labels: ["question"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Stuck on something in the [workshop](https://github.com/zAcherttp/robloxstudio-mcp/tree/main/docs/workshop)? Say where, what you saw and what you tried. Paste errors as text, not screenshots, and remove any keys or cookies first.
+  - type: dropdown
+    id: module
+    attributes:
+      label: Module
+      options:
+        - 1. Setup
+        - 2. First contact
+        - 3. Trust, but verify
+        - 4. Your own game
+        - 5. Windows check
+        - Not part of the workshop
+    validations:
+      required: true
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options:
+        - macOS
+        - Windows
+        - Linux
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: The step you were on, what you expected, and what you saw instead. Paste the error.
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: tried
+    attributes:
+      label: What you already tried
+  - type: input
+    id: versions
+    attributes:
+      label: Versions
+      description: "`node -v`, Studio version, and `git rev-parse --short HEAD` in the fork"
+      placeholder: "node v22.x · Studio 0.7xx · fork abc1234"

@@ -1,0 +1,21 @@
+name: Windows check
+description: Report from module 5 of the workshop, run on Windows.
+title: "Windows check: "
+labels: ["documentation"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Paste the report from the workshop page's **Copy report** button (or tick the list in [05-windows-check.md](https://github.com/zAcherttp/robloxstudio-mcp/blob/main/docs/workshop/05-windows-check.md)). Anything that failed: paste its error under Notes.
+  - type: textarea
+    id: report
+    attributes:
+      label: Report
+      render: text
+    validations:
+      required: true
+  - type: input
+    id: versions
+    attributes:
+      label: Versions
+      description: "Windows version, `node -v`, Studio version, `git rev-parse --short HEAD`"

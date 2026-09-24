@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Upstream robloxstudio-mcp
+    url: https://github.com/chrrxs/robloxstudio-mcp/issues
+    about: A bug that also happens with upstream's own build belongs there.
