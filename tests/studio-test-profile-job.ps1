@@ -62,7 +62,8 @@ const [mode, node, installer, gate] = process.argv.slice(2);
 function command(expected, action) {
   const reader = createInterface({ input: process.stdin });
   reader.once('line', (line) => {
-    assert.equal(line, expected);
+    // Windows PowerShell 5 writes a UTF-8 byte-order mark before the first line it sends.
+    assert.equal(line.replace(/^\uFEFF/, ''), expected);
     reader.close();
     process.stdin.pause();
     action();
