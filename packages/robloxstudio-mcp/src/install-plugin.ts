@@ -171,6 +171,14 @@ export async function installPlugin(options: InstallOptions = {}): Promise<void>
     return;
   }
 
+  // Fork: upstream's released plugin lacks this fork's tools and reports a build this server does
+  // not match, so never fall back to downloading it. Set RSMCP_ALLOW_UPSTREAM_PLUGIN=1 to opt in.
+  if (process.env.RSMCP_ALLOW_UPSTREAM_PLUGIN !== '1') {
+    throw new Error(
+      `${ASSET_NAME} is not built in this checkout. Run npm run build:plugin, which builds it and installs it into Studio's Plugins folder.`,
+    );
+  }
+
   log(dev ? 'Fetching latest dev prerelease...' : 'Fetching latest release...');
   const release = dev
     ? await findDevRelease()

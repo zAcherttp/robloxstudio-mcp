@@ -6,6 +6,27 @@ screenshots, memory reports, and profiler captures from each peer.
 
 [![NPM Version](https://img.shields.io/npm/v/@chrrxs/robloxstudio-mcp)](https://www.npmjs.com/package/@chrrxs/robloxstudio-mcp)
 
+> **This is a fork** of [chrrxs/robloxstudio-mcp](https://github.com/chrrxs/robloxstudio-mcp),
+> installed from source so upstream changes are reviewed before they run. The npm badge above and
+> the `npx` commands under [Setup](#setup) install **upstream**, not this fork. What the fork adds
+> is in [LOCAL.md](LOCAL.md).
+>
+> **Install this fork** (Node 22+, git; macOS/Linux shown, Windows and troubleshooting in
+> [docs/workshop/01-setup.md](docs/workshop/01-setup.md)):
+>
+> ```bash
+> git clone https://github.com/zAcherttp/robloxstudio-mcp.git && cd robloxstudio-mcp
+> npm install && npm install --prefix studio-plugin
+> npm run build && npm run build:plugin     # the plugin is copied into Studio's Plugins folder
+> claude mcp add robloxstudio --scope user -- node "$(pwd)/packages/robloxstudio-mcp/dist/index.js" --auto-install-plugin
+> ```
+>
+> Restart Studio, open **Plugins → MCP Server**, and it shows **Connected** while Claude Code runs.
+>
+> **For a team:** [docs/workshop/](docs/workshop/README.md) is a hands-on session from setup to
+> your own game. [docs/agent-guide.md](docs/agent-guide.md) is what an agent should know about
+> driving Studio, and [docs/roblox-skills.md](docs/roblox-skills.md) which skills to trust.
+
 ## What it can do
 
 ### Debug a running game
@@ -42,6 +63,7 @@ screenshots, memory reports, and profiler captures from each peer.
 
 - Fetch official engine API documentation as Markdown with `get_roblox_docs`.
 - List and retrieve Roblox-authored skills with `get_roblox_skills`.
+- Read engine traps plus your project's own `LESSONS.md` with `get_project_lessons` (fork).
 
 See the [complete tool list](packages/core/src/tools/definitions.ts).
 

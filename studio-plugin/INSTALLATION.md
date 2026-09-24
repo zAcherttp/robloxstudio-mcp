@@ -4,6 +4,11 @@ Complete your AI assistant integration with this easy-to-install Studio plugin. 
 
 ## Quick Installation
 
+> **Fork:** every method below installs **upstream's** plugin, which lacks this fork's tools and
+> does not match its server. For this fork, run `npm run build:plugin` in your clone: it builds the
+> plugin and copies it into Studio's Plugins folder. See
+> [docs/workshop/01-setup.md](../docs/workshop/01-setup.md).
+
 ### Method 1: Roblox Creator Store (Easiest)
 1. **Install from Creator Store:**
    - Visit: https://create.roblox.com/store/asset/132985143757536
@@ -97,7 +102,7 @@ If you encounter issues, you may need to run it through `cmd`. Update your confi
 4. **Plugin sends progress and the response** over the same socket; the server acknowledges retained responses
 5. **AI receives** comprehensive Studio information
 
-**Available Tools:** 37+ specialized tools for file trees, scripts, properties, attributes, tags, and more!
+**Available Tools:** 50 tools for file trees, scripts, properties, attributes, tags, and more!
 
 ## Troubleshooting
 

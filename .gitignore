@@ -38,6 +38,8 @@ studio-plugin/.Carbon.rbxm.lock
 
 # Development files (keep local only)
 CLAUDE.md
+# Fork: the workshop ships a CLAUDE.md template for teams to copy.
+!docs/workshop/templates/CLAUDE.md
 MCP_Server_Plan.md
 test-*.js
 example-*.json

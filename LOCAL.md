@@ -7,7 +7,12 @@ upstream changes are reviewed and adopted deliberately rather than pulled automa
 It exists for control over when upstream code runs. Keep local changes few and small: every one
 is a conflict waiting at the next merge. What this fork carries on top of upstream:
 
-- **The framework's lessons** (`get_core_lessons`), served from the MCP.
+- **`get_project_lessons`**: one-line Roblox engine traps shipped in the server
+  (`packages/core/src/knowledge/engine-lessons.ts`, hand-maintained, nothing game- or
+  framework-specific), plus the project's own `LESSONS.md` (or `docs/LESSONS.md`, or
+  `ROBLOX_PROJECT_LESSONS`), read at call time from the directory the client launched the server
+  in, which for Claude Code is the project. Replaced `get_core_lessons`, which vendored one
+  framework's lessons into the build. Only `.md` files under 256 KB are read.
 - **`capture_heap_snapshot`** (`packages/core/src/heap-snapshot.ts`): a Luau heap snapshot of a
   play server or client, written to a file, with a summary of what holds memory and, given an
   earlier file, what grew. It runs through `execute_luau`, which runs as the plugin: the eval
@@ -30,10 +35,16 @@ is a conflict waiting at the next merge. What this fork carries on top of upstre
   refusals are never overridden. It began as this fork's own macOS capture, before upstream had
   one; merged with upstream's in September 2026.
 
-Known on macOS, before and after that merge: `tests/studio-test-snapshot.mjs` and
-`tests/studio-install-repair.mjs` fail, because the Studio test harness they cover is written for
-Windows (`/var` is a link to `/private/var` there, and the snapshot test expects Windows' handling of
-case-colliding names). `npm test` stops at the first, so run the later stages on their own.
+- **`npm test` passes on macOS.** `tests/studio-test-snapshot.mjs` and
+  `tests/studio-install-repair.mjs` resolve their temp directory (`/var` links to `/private/var`),
+  and the snapshot test skips its case-collision case on a case-insensitive filesystem, where two
+  such paths cannot exist.
+- **CI** (`.github/workflows/ci.yml`): build, plugin build and `npm test` on Windows, macOS and
+  Linux. Upstream has no CI; this is what makes "works on Windows" more than a reading of the code.
+  It never starts Studio.
+- **`.gitattributes`**: LF everywhere, so a Windows checkout builds and tests the same bytes.
+- **Docs for a team:** a fork quickstart at the top of `README.md`, `docs/agent-guide.md`
+  (driving Studio as an agent, game-agnostic), `docs/roblox-skills.md`, and `docs/workshop/`.
 
 ## How Claude Code runs it
 
