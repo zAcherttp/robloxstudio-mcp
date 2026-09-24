@@ -1820,9 +1820,9 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
     }
   },
 
-  // === Framework Lessons ===
+  // === Lessons ===
   {
-    name: 'get_core_lessons',
+    name: 'get_project_lessons',
     category: 'read',
     // Read-only, but it is knowledge for writing code rather than a way to inspect a place, so
     // it stays off the inspector's minimal surface.
@@ -1830,13 +1830,17 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
     // The catalog shortens anything past 120 characters, so this says the one thing that has to
     // survive: read it first, and it is short.
     description:
-      'Use first in a roblox-core project: every Roblox trap this kit already paid for, one line each.',
+      "Use before building: known Roblox engine traps plus this project's LESSONS.md, one line each.",
     inputSchema: {
       type: 'object',
       properties: {
         domain: {
           type: 'string',
-          description: 'Optional substring filter, e.g. PROPERTY or MEASURE. Omit for all.'
+          description: 'Optional substring filter, e.g. NET or MEASURE. Omit for all.'
+        },
+        path: {
+          type: 'string',
+          description: "Optional .md lessons file. Defaults to ROBLOX_PROJECT_LESSONS, then LESSONS.md or docs/LESSONS.md in the server's working directory."
         }
       }
     }

@@ -181,16 +181,17 @@ describe('Tool schema compatibility', () => {
     expect(props).not.toHaveProperty('lineRange');
   });
 
-  test('get_core_lessons serves vendored knowledge without Studio routing', () => {
-    const tool = TOOL_DEFINITIONS.find((candidate) => candidate.name === 'get_core_lessons');
+  test('get_project_lessons answers from disk and the build, without Studio routing', () => {
+    const tool = TOOL_DEFINITIONS.find((candidate) => candidate.name === 'get_project_lessons');
     expect(tool).toBeDefined();
-    // It answers from a compiled-in string, so it must not ask for a Studio instance and must
-    // not require anything: the whole file is the useful default.
+    // It never reaches Studio, so it must not ask for an instance and must not require
+    // anything: everything is the useful default.
     const schema = tool!.inputSchema as { properties?: Record<string, unknown>; required?: string[] };
     expect(schema.properties).not.toHaveProperty('instance_id');
     expect(schema.required).toBeUndefined();
     expect(schema.properties).toHaveProperty('domain');
-    expect(TOOL_HANDLERS.get_core_lessons).toBeDefined();
+    expect(schema.properties).toHaveProperty('path');
+    expect(TOOL_HANDLERS.get_project_lessons).toBeDefined();
   });
 
   test('get_roblox_skills exposes list/get without Studio routing', () => {
@@ -236,7 +237,7 @@ describe('Tool schema compatibility', () => {
     'manage_instance',
     'get_roblox_docs',
     'get_roblox_skills',
-    'get_core_lessons',
+    'get_project_lessons',
   ]);
 
   function toolHandlerBody(toolName: string): string {

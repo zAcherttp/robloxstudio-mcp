@@ -3,14 +3,16 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import {
-  existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync,
+  existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync,
   symlinkSync, writeFileSync,
 } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { prepareStudioTestSnapshot } from '../scripts/studio-test-snapshot.mjs';
 
-const directory = mkdtempSync(path.join(os.tmpdir(), 'rsmcp-snapshot-tests-'));
+// Resolved: macOS's temp directory sits behind a symlink (/var -> /private/var), and the snapshot
+// reports resolved paths.
+const directory = realpathSync(mkdtempSync(path.join(os.tmpdir(), 'rsmcp-snapshot-tests-')));
 const sourceDirectory = path.join(directory, 'working tree ü');
 const destinationParent = path.join(directory, 'exports');
 
@@ -166,11 +168,15 @@ try {
     assert.deepEqual(readdirSync(destinationParent).sort(), existingWorkers);
     rmSync(path.join(sourceDirectory, '..\\escaped.ts'));
     put('Case/one.ts', 'one\n');
-    put('case/two.ts', 'two\n');
-    await assert.rejects(prepareStudioTestSnapshot({ sourceDirectory, destinationParent }), /case-colliding/);
-    assert.deepEqual(readdirSync(destinationParent).sort(), existingWorkers);
+    // A case-insensitive filesystem (macOS's default) cannot hold two paths that differ only in
+    // case, so there is no collision to build there.
+    if (!existsSync(path.join(sourceDirectory, 'case', 'one.ts'))) {
+      put('case/two.ts', 'two\n');
+      await assert.rejects(prepareStudioTestSnapshot({ sourceDirectory, destinationParent }), /case-colliding/);
+      assert.deepEqual(readdirSync(destinationParent).sort(), existingWorkers);
+      rmSync(path.join(sourceDirectory, 'case'), { recursive: true });
+    }
     rmSync(path.join(sourceDirectory, 'Case'), { recursive: true });
-    rmSync(path.join(sourceDirectory, 'case'), { recursive: true });
   }
 
   // Linked worktrees use a .git file instead of a directory; no history is copied.

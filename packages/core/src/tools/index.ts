@@ -22,7 +22,7 @@ import {
 } from '../image-decode.js';
 import { DOC_CATEGORIES, getRobloxDoc, isDocCategory } from '../roblox-docs.js';
 import { findBuiltInStudioSkill, loadBuiltInStudioSkills } from '../studio-skills.js';
-import { CORE_LESSONS, CORE_LESSON_COUNT } from '../knowledge/lessons.js';
+import { ENGINE_LESSONS } from '../knowledge/engine-lessons.js';
 import { rgbaToJpeg } from '../jpeg-encoder.js';
 import { rgbaToPng } from '../png-encoder.js';
 import {
@@ -1074,58 +1074,26 @@ export class RobloxStudioTools {
     return { content: [{ type: 'text', text: JSON.stringify(body) }] };
   }
 
-  // The framework's own hard-won knowledge, vendored at build time so a machine with the MCP
-  // and no roblox-core checkout still gets it. Sibling to get_roblox_skills: that one serves
-  // Roblox's installed Assistant skills, this one serves ours.
-  async getCoreLessons(domain?: string) {
+  // Lessons: Roblox engine traps shipped with the server, plus the project's own LESSONS.md read
+  // from disk at call time, so a team's lessons stay in their repository and take effect on save.
+  // Sibling to get_roblox_skills: that one serves Roblox's installed Assistant skills, this one
+  // serves what was learned the hard way. Both sources share one line format, so one filter
+  // serves both.
+  async getProjectLessons(domain?: string, lessonsPath?: string) {
     const filter = (domain ?? '').trim().toUpperCase();
-    if (!filter) {
-      return {
-        content: [
-          {
-            type: 'text',
-            text: JSON.stringify({
-              source: 'roblox-core/LESSONS.md',
-              count: CORE_LESSON_COUNT,
-              lessons: CORE_LESSONS,
-            }),
-          },
-        ],
-      };
-    }
-
-    // A lesson is a tagged line plus the indented arrow line under it; keep them together or
-    // the answer is half a sentence.
-    const lines = CORE_LESSONS.split('\n');
-    const kept: string[] = [];
-    let keeping = false;
-    for (const line of lines) {
-      const tagged = /^([A-Z]{3,8}) {2}(.*)$/.exec(line);
-      if (tagged) {
-        keeping = line.toUpperCase().includes(filter);
-        if (keeping) kept.push(line);
-        continue;
-      }
-      if (keeping && /^\s+/.test(line) && line.trim().length > 0) {
-        kept.push(line);
-        continue;
-      }
-      keeping = false;
-    }
-
-    return {
-      content: [
-        {
-          type: 'text',
-          text: JSON.stringify({
-            source: 'roblox-core/LESSONS.md',
-            domain: filter,
-            count: kept.filter((line) => /^[A-Z]{3,8} {2}/.test(line)).length,
-            lessons: kept.length > 0 ? kept.join('\n') : `No lesson mentions "${filter}".`,
-          }),
-        },
-      ],
+    const project = readProjectLessons(lessonsPath);
+    const engine = filterLessons(ENGINE_LESSONS, filter);
+    const body: Record<string, unknown> = {
+      engine: { source: 'robloxstudio-mcp', count: engine.count, lessons: engine.text },
     };
+    if (project.text !== undefined) {
+      const own = filterLessons(project.text, filter);
+      body.project = { source: project.source, count: own.count, lessons: own.text };
+    } else {
+      body.project = { source: null, looked_in: project.lookedIn, note: project.note };
+    }
+    if (filter) body.domain = filter;
+    return this._textResult(body);
   }
 
   async getRobloxSkills(action: string, name?: string) {
@@ -5621,4 +5589,72 @@ export class RobloxStudioTools {
       ],
     };
   }
+}
+
+// A lesson is a tagged line (`DOMAIN  text`) plus the indented lines under it; the filter keeps
+// them together, or the answer is half a sentence without its "do this instead".
+const LESSON_TAG = /^([A-Z]{2,10}) {2}(.*)$/;
+const PROJECT_LESSON_FILES = ['LESSONS.md', path.join('docs', 'LESSONS.md')];
+const PROJECT_LESSONS_MAX_BYTES = 256 * 1024;
+
+export function filterLessons(text: string, domain: string): { count: number; text: string } {
+  const filter = domain.trim().toUpperCase();
+  const lines = text.split(/\r?\n/);
+  if (!filter) {
+    return { count: lines.filter((line) => LESSON_TAG.test(line)).length, text: lines.join('\n') };
+  }
+  const kept: string[] = [];
+  let keeping = false;
+  let count = 0;
+  for (const line of lines) {
+    if (LESSON_TAG.test(line)) {
+      keeping = line.toUpperCase().includes(filter);
+      if (keeping) {
+        kept.push(line);
+        count += 1;
+      }
+      continue;
+    }
+    if (keeping && /^\s+/.test(line) && line.trim().length > 0) {
+      kept.push(line);
+      continue;
+    }
+    keeping = false;
+  }
+  return { count, text: kept.length > 0 ? kept.join('\n') : `No lesson mentions "${filter}".` };
+}
+
+// Where a project keeps its lessons: an explicit path, then ROBLOX_PROJECT_LESSONS, then
+// LESSONS.md or docs/LESSONS.md in the directory the MCP client launched the server from, which
+// for Claude Code is the project. Only a Markdown file is read, and only a bounded one.
+export function readProjectLessons(
+  explicitPath?: string,
+  env: NodeJS.ProcessEnv = process.env,
+  cwd: string = process.cwd(),
+): { text?: string; source?: string; lookedIn: string[]; note?: string } {
+  const configured = (explicitPath ?? '').trim() || (env.ROBLOX_PROJECT_LESSONS ?? '').trim();
+  const candidates = configured
+    ? [path.resolve(cwd, configured)]
+    : PROJECT_LESSON_FILES.map((name) => path.resolve(cwd, name));
+  for (const candidate of candidates) {
+    if (path.extname(candidate).toLowerCase() !== '.md') {
+      return { lookedIn: candidates, note: `${candidate} is not a Markdown file; lessons are read only from .md files.` };
+    }
+    let stat: fs.Stats;
+    try {
+      stat = fs.statSync(candidate);
+    } catch {
+      continue;
+    }
+    if (!stat.isFile()) continue;
+    if (stat.size > PROJECT_LESSONS_MAX_BYTES) {
+      return { lookedIn: candidates, note: `${candidate} is ${stat.size} bytes; keep lessons under ${PROJECT_LESSONS_MAX_BYTES}.` };
+    }
+    return { text: fs.readFileSync(candidate, 'utf8'), source: candidate, lookedIn: candidates };
+  }
+  return {
+    lookedIn: candidates,
+    note: 'This project has no lessons file. Add LESSONS.md at the project root (or set ROBLOX_PROJECT_LESSONS) '
+      + 'with one `DOMAIN  what is true` line per trap, an indented `→ what to do instead` under it.',
+  };
 }

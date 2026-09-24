@@ -2,7 +2,7 @@
 // Offline only: no native commands, downloads, installer dispatch or timers.
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
-import { mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync, appendFileSync, statSync, existsSync, symlinkSync, utimesSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync, appendFileSync, statSync, existsSync, realpathSync, symlinkSync, utimesSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { repairStudioInstallation, readFreshInstallerEvidence, parseStudioRepairArguments, finalizeStudioRepair, parseCompletedInstallerLog } from '../scripts/studio-install-repair.mjs';
@@ -219,7 +219,9 @@ assert.throws(() => parseCompletedInstallerLog(completedLog, finalizeStart + 3_6
   assert.equal(test.calls.starts, 0);
 }
 
-const directory = mkdtempSync(path.join(tmpdir(), 'studio-install-repair-'));
+// Resolved: macOS's temp directory sits behind a symlink (/var -> /private/var), which repair
+// finalization rightly refuses as a redirect.
+const directory = realpathSync(mkdtempSync(path.join(tmpdir(), 'studio-install-repair-')));
 try {
   const logs = path.join(directory, 'logs');
   mkdirSync(logs);

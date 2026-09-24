@@ -1,0 +1,6 @@
+# Every text file is stored and checked out with LF, on Windows too: tests compare
+# generated output byte for byte, and PowerShell reads LF scripts fine.
+* text=auto eol=lf
+*.png binary
+*.rbxm binary
+*.rbxmx text eol=lf

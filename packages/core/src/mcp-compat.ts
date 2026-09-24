@@ -88,7 +88,7 @@ manage_instance can launch, inspect, and close Studio or list published place re
 
 ## Roblox reference material
 
-Use get_roblox_docs for official engine and Luau reference pages. Use get_roblox_skills to list or read Roblox-authored Studio Assistant skills when their longer guidance is useful.
+Use get_roblox_docs for official engine and Luau reference pages. Use get_roblox_skills to list or read Roblox-authored Studio Assistant skills when their longer guidance is useful. Use get_project_lessons before building: engine traps that cost earlier sessions time, plus the project's own LESSONS.md, one line each, filterable by domain (NET, STUDIO, MEASURE, ...).
 `;
 
 /** Official Roblox reference templates shared by the HTTP and stdio servers. */

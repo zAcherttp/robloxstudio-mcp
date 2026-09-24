@@ -53,8 +53,7 @@
     "test:studio:tools": "node scripts/studio-test-profile.mjs run -- tests/run-with-test-port.mjs tests/studio-tooling-smoke.mjs",
     "test:watch": "npm run test:watch -w packages/core",
     "test:coverage": "npm run test:coverage -w packages/core",
-    "publish:all": "node scripts/publish.mjs",
-    "sync:lessons": "node scripts/sync-core-lessons.mjs"
+    "publish:all": "node scripts/publish.mjs"
   },
   "devDependencies": {
     "@typescript-eslint/eslint-plugin": "^7.0.0",
