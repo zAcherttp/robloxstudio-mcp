@@ -61,18 +61,20 @@ try {
     );
     writeFileSync(path.join(destination, 'stale-source.ts'), 'left by an interrupted pack');
 
-    const result = spawnSync(
-      process.platform === 'win32' ? 'npm.cmd' : 'npm',
-      ['pack', '--dry-run', '--json', '--silent'],
-      {
+    // Node refuses to spawn npm.cmd on Windows without a shell (CVE-2024-27980), so run npm's own
+    // entry script through Node when npm started this test, which it does under `npm test`.
+    const npmArgs = ['pack', '--dry-run', '--json', '--silent'];
+    const result = process.env.npm_execpath
+      ? spawnSync(process.execPath, [process.env.npm_execpath, ...npmArgs], { cwd: packageDir, encoding: 'utf8' })
+      : spawnSync(process.platform === 'win32' ? 'npm.cmd' : 'npm', npmArgs, {
         cwd: packageDir,
         encoding: 'utf8',
-      },
-    );
+        shell: process.platform === 'win32',
+      });
     assert.equal(
       result.status,
       0,
-      `${packageDefinition.name} npm pack succeeds: ${result.stderr || result.stdout}`,
+      `${packageDefinition.name} npm pack succeeds: ${result.error ?? ''} ${result.stderr || result.stdout}`,
     );
     const reportJson = result.stdout.match(/^\[[\s\S]*$/m)?.[0];
     assert.ok(reportJson, `npm pack returned a JSON report: ${result.stdout}`);
