@@ -48,6 +48,7 @@ is a conflict waiting at the next merge. What this fork carries on top of upstre
   the managed-instance registry lock failed outright on Windows' transient `EPERM`/`ENOENT`
   instead of retrying.
 - **`.gitattributes`**: LF everywhere, so a Windows checkout builds and tests the same bytes.
+- **`LESSONS.md`**: this fork's own lessons, one line each, append only. Not from upstream.
 - **Docs for a team:** a fork quickstart at the top of `README.md`, `docs/agent-guide.md`
   (driving Studio as an agent, game-agnostic), `docs/roblox-skills.md`, and `docs/workshop/`.
 
