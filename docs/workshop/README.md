@@ -4,6 +4,9 @@ A hands-on session for a Roblox team. By the end, everyone has Claude Code drivi
 Roblox Studio through this MCP, has watched it build, playtest and check something, and has
 started a repository for their own game with the two files that make an agent useful there.
 
+The same workshop as one page, with an English/Vietnamese switch and pre-filled issue links, is
+[workshop.html](workshop.html), published as a Claude Artifact for the session.
+
 **No framework is required or taught.** Structure your game however your team likes; this
 workshop is about the loop between you, the agent and Studio, not about any codebase.
 

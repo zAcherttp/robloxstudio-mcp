@@ -1,0 +1,707 @@
+<!-- The workshop as one page, English and Vietnamese. Published as a claude.ai Artifact: the
+     publisher wraps this in its own doctype, head and body, so the file starts at <title>.
+     Edit here, then republish from a Claude session on the account that owns the page. -->
+<title>Studio Agent Workshop</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@80..100,500..800&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&family=JetBrains+Mono:wght@400;600&display=swap&subset=vietnamese">
+<style>
+:root{
+  --ground:#F4F6F8; --surface:#FFFFFF; --sunken:#EBEEF2; --ink:#15181D; --muted:#586070;
+  --line:#D9DEE5; --accent:#16805C; --accent-soft:#DDF1E8; --warn:#A86A00; --warn-soft:#FBEFD6;
+  --bad:#B42318; --bad-soft:#FDE7E5;
+  --code-bg:#1B1F26; --code-ink:#E4E8EE; --stud:rgba(22,128,92,.10); --bar:rgba(244,246,248,.88);
+  --display:"Archivo","Arial Narrow",system-ui,sans-serif;
+  --body:"IBM Plex Sans",system-ui,-apple-system,"Segoe UI",sans-serif;
+  --mono:"JetBrains Mono",ui-monospace,"SF Mono",Menlo,Consolas,monospace;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --ground:#101317; --surface:#171B21; --sunken:#1E232B; --ink:#E5E9EF; --muted:#9AA3B2;
+    --line:#2A313B; --accent:#4CC39A; --accent-soft:#16392D; --warn:#E3A93B; --warn-soft:#3A2D12;
+    --bad:#F28B82; --bad-soft:#3B1D1B;
+    --code-bg:#0B0D10; --code-ink:#E4E8EE; --stud:rgba(76,195,154,.10); --bar:rgba(16,19,23,.88); color-scheme:dark;
+  }
+}
+:root[data-theme="dark"]{
+  --ground:#101317; --surface:#171B21; --sunken:#1E232B; --ink:#E5E9EF; --muted:#9AA3B2;
+  --line:#2A313B; --accent:#4CC39A; --accent-soft:#16392D; --warn:#E3A93B; --warn-soft:#3A2D12;
+  --bad:#F28B82; --bad-soft:#3B1D1B;
+  --code-bg:#0B0D10; --code-ink:#E4E8EE; --stud:rgba(76,195,154,.10); --bar:rgba(16,19,23,.88); color-scheme:dark;
+}
+*{box-sizing:border-box}
+body{background:var(--ground);color:var(--ink);font:16px/1.6 var(--body);padding-inline:16px;padding-block:0 64px}
+a{color:var(--accent);text-underline-offset:2px}
+a:focus-visible,button:focus-visible,input:focus-visible,textarea:focus-visible{outline:2px solid var(--accent);outline-offset:2px;border-radius:4px}
+code{font:0.88em var(--mono);background:var(--sunken);padding:.1em .35em;border-radius:4px}
+h1,h2,h3{font-family:var(--display);text-wrap:balance;line-height:1.15;margin:0}
+.wrap{max-width:1120px;margin:0 auto}
+
+/* Language and OS switching */
+.l-vi{display:none}
+body[data-lang="vi"] .l-en{display:none}
+body[data-lang="vi"] .l-vi{display:revert}
+[data-os-only]{display:none}
+body[data-os="mac"] [data-os-only="mac"],body[data-os="win"] [data-os-only="win"],body:not([data-os]) [data-os-only="mac"]{display:block}
+
+/* Top bar */
+.bar{position:sticky;top:0;z-index:5;margin:0 -16px;padding:calc(env(safe-area-inset-top,0px) + 8px) 16px 8px;background:var(--bar);backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);border-bottom:1px solid var(--line)}
+.bar .wrap{display:flex;flex-wrap:wrap;gap:8px 16px;align-items:center;justify-content:space-between}
+.brand{font:700 15px var(--display);font-stretch:90%;letter-spacing:.01em;display:flex;align-items:center;gap:8px}
+.brand i{display:inline-block;width:14px;height:14px;border-radius:3px;background:var(--accent);box-shadow:inset 0 0 0 3px var(--accent-soft)}
+.toggles{display:flex;flex-wrap:wrap;gap:8px}
+.seg{display:inline-flex;border:1px solid var(--line);border-radius:999px;padding:2px;background:var(--surface)}
+.seg button{font:500 13px var(--body);border:0;background:transparent;color:var(--muted);padding:4px 12px;border-radius:999px;cursor:pointer}
+.seg button[aria-pressed="true"]{background:var(--ink);color:var(--ground)}
+
+/* Header: a baseplate of studs */
+header.top{margin:0 -16px;padding:40px 16px 36px;border-bottom:1px solid var(--line);
+  background:radial-gradient(circle at 50% 50%,var(--stud) 0 5px,transparent 5.5px) 0 0/22px 22px,var(--surface)}
+.eyebrow{font:600 12px/1.4 var(--mono);letter-spacing:.08em;text-transform:uppercase;color:var(--accent)}
+header h1{font-size:clamp(34px,6vw,56px);font-weight:800;font-stretch:88%;margin:12px 0 14px;max-width:17ch}
+header p.lede{font-size:18px;color:var(--muted);max-width:62ch;margin:0}
+.facts{display:flex;flex-wrap:wrap;gap:8px 20px;margin-top:20px;font-size:14px;color:var(--muted)}
+.facts b{color:var(--ink);font-weight:600}
+
+/* Agenda */
+.agenda{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px;margin:26px 0 0}
+.agenda a{display:grid;gap:4px;padding:14px;border:1px solid var(--line);border-radius:8px;background:var(--surface);color:var(--ink);text-decoration:none;position:relative}
+.agenda a:hover{border-color:var(--accent)}
+.agenda .n{font:600 12px var(--mono);color:var(--accent)}
+.agenda .h{font:700 17px/1.2 var(--display);font-stretch:94%}
+.agenda .o{font-size:13.5px;color:var(--muted)}
+.agenda .t{font:12px var(--mono);color:var(--muted)}
+
+/* Layout */
+.layout{display:grid;grid-template-columns:220px minmax(0,1fr);gap:48px;margin-top:36px}
+nav.toc{position:sticky;top:calc(env(safe-area-inset-top,0px) + 64px);align-self:start;font-size:14px}
+nav.toc ol{list-style:none;margin:0;padding:0;display:grid;gap:2px}
+nav.toc a{display:grid;grid-template-columns:22px 1fr auto;gap:6px;padding:7px 8px;border-radius:6px;color:var(--ink);text-decoration:none}
+nav.toc a:hover{background:var(--sunken)}
+nav.toc .n{font:600 12px/1.6 var(--mono);color:var(--muted)}
+nav.toc .t{font:12px/1.6 var(--mono);color:var(--muted);font-variant-numeric:tabular-nums}
+nav.toc .ref{margin-top:18px;padding-top:14px;border-top:1px solid var(--line);display:grid;gap:6px}
+nav.toc .ref a{display:block;padding:2px 8px;color:var(--accent)}
+main{min-width:0}
+section.mod{padding-block:8px 40px;border-bottom:1px solid var(--line);margin-bottom:36px;scroll-margin-top:72px}
+section.mod:last-of-type{border-bottom:0}
+.modhead{display:flex;flex-wrap:wrap;align-items:baseline;gap:6px 14px;margin-bottom:6px}
+.modhead .num{font:600 13px var(--mono);color:var(--accent)}
+.modhead h2{font-size:30px;font-weight:750;font-stretch:92%}
+.modhead .time{font:13px var(--mono);color:var(--muted);font-variant-numeric:tabular-nums}
+.goal{color:var(--muted);max-width:66ch;margin:0 0 20px}
+h3{font-size:19px;font-weight:700;margin:28px 0 8px}
+main p,main li{max-width:68ch}
+main ul{padding-left:20px}
+main li{margin-bottom:4px}
+
+/* Code with copy */
+.code{position:relative;margin:12px 0;border-radius:8px;background:var(--code-bg);color:var(--code-ink)}
+.code pre{margin:0;padding:14px 16px;overflow-x:auto;font:13.5px/1.6 var(--mono);white-space:pre}
+.code .lang{position:absolute;top:8px;left:16px;font:600 10px var(--mono);letter-spacing:.08em;text-transform:uppercase;color:#8A94A6}
+.code.has-lang pre{padding-top:30px}
+.copy{position:absolute;top:6px;right:6px;font:500 12px var(--body);border:1px solid #3A424F;background:#232933;color:#D5DBE4;border-radius:5px;padding:4px 9px;cursor:pointer}
+.copy:hover{background:#2D3440}
+
+/* Prompts to type into claude */
+.prompt{position:relative;margin:14px 0;padding:14px 88px 14px 16px;background:var(--surface);border:1px solid var(--line);border-left:3px solid var(--accent);border-radius:6px}
+.prompt::before{content:"› claude";display:block;font:600 11px var(--mono);letter-spacing:.06em;color:var(--accent);margin-bottom:4px}
+.prompt p{margin:0;font-size:15.5px}
+.prompt .copy{top:10px;right:10px;border-color:var(--line);background:var(--sunken);color:var(--ink)}
+.watch{font-size:14px;color:var(--muted)}
+.watch code{font-size:12.5px}
+
+/* Notes */
+.note{margin:16px 0;padding:12px 14px;border-radius:6px;background:var(--accent-soft);font-size:15px}
+.note.warn{background:var(--warn-soft)}
+.note b{font-weight:600}
+
+/* Tables */
+.tbl{overflow-x:auto;margin:12px 0;border:1px solid var(--line);border-radius:8px;background:var(--surface)}
+table{border-collapse:collapse;width:100%;font-size:14.5px}
+th,td{text-align:left;padding:9px 12px;border-bottom:1px solid var(--line);vertical-align:top}
+tr:last-child td{border-bottom:0}
+th{font:600 12px var(--mono);letter-spacing:.04em;text-transform:uppercase;color:var(--muted);background:var(--sunken);white-space:nowrap}
+td:first-child{white-space:nowrap}
+.tbl.wrapfirst td:first-child{white-space:normal;min-width:180px}
+
+/* Buttons */
+.btn{font:500 14px var(--body);border:1px solid var(--ink);background:var(--ink);color:var(--ground);border-radius:6px;padding:8px 14px;cursor:pointer}
+.btn.ghost{background:transparent;color:var(--ink);border-color:var(--line)}
+.status{font-size:14px;color:var(--muted)}
+
+/* Module completion (kept in this browser) */
+.donebar{display:flex;flex-wrap:wrap;align-items:center;gap:10px;margin-top:28px;padding:12px 14px;border:1px dashed var(--line);border-radius:8px}
+.donebar .hint{font-size:14px;color:var(--muted)}
+.btn.done{background:var(--accent-soft);color:var(--ink);border-color:var(--accent)}
+a.btn{display:inline-block;text-decoration:none}
+.agenda a.is-done{border-color:var(--accent);background:var(--accent-soft)}
+.agenda .tick{position:absolute;top:12px;right:12px;font:600 12px var(--mono);color:var(--accent)}
+nav.toc a.is-done .n{color:var(--accent)}
+
+/* Blocked form */
+.form{display:grid;gap:12px;padding:16px;border:1px solid var(--line);border-radius:10px;background:var(--surface);max-width:720px}
+.form label{display:block;font:600 12px var(--mono);letter-spacing:.05em;text-transform:uppercase;color:var(--muted);margin-bottom:4px}
+.form select,.form textarea{width:100%;font:15px/1.5 var(--body);padding:8px 10px;border:1px solid var(--line);border-radius:6px;background:var(--ground);color:var(--ink)}
+.form textarea{resize:vertical}
+.form .meta{font-size:13.5px;color:var(--muted)}
+
+/* Checklist */
+.check{list-style:none;padding:0;margin:8px 0}
+.check li{display:flex;gap:10px;align-items:flex-start;padding:5px 0}
+.check input{margin-top:5px;accent-color:var(--accent);width:16px;height:16px;flex:none}
+.check label{cursor:pointer}
+.checkgroup{font:600 12px var(--mono);letter-spacing:.06em;text-transform:uppercase;color:var(--muted);margin-top:16px}
+.row{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-top:14px}
+
+footer{max-width:1120px;margin:24px auto 0;padding-top:20px;border-top:1px solid var(--line);font-size:14px;color:var(--muted)}
+
+@media (max-width:860px){
+  .layout{grid-template-columns:1fr;gap:8px}
+  nav.toc{position:static}
+  nav.toc ol{grid-template-columns:repeat(auto-fit,minmax(150px,1fr))}
+  nav.toc .ref{display:flex;flex-wrap:wrap}
+}
+@media (prefers-reduced-motion:reduce){*{transition:none!important;scroll-behavior:auto!important}}
+html{scroll-behavior:smooth}
+</style>
+
+<div class="bar">
+  <div class="wrap">
+    <div class="brand"><i aria-hidden="true"></i>Studio Agent Workshop</div>
+    <div class="toggles">
+      <div class="seg" role="group" aria-label="Language / Ngôn ngữ">
+        <button type="button" id="lang-en" data-lang="en" aria-pressed="true">English</button>
+        <button type="button" id="lang-vi" data-lang="vi" aria-pressed="false">Tiếng Việt</button>
+      </div>
+      <div class="seg" role="group" aria-label="Operating system">
+        <button type="button" id="os-mac" data-os="mac" aria-pressed="true">macOS</button>
+        <button type="button" id="os-win" data-os="win" aria-pressed="false">Windows</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<header class="top">
+  <div class="wrap">
+    <div class="eyebrow"><span class="l-en">Roblox team workshop · robloxstudio-mcp fork</span><span class="l-vi">Workshop cho team Roblox · bản fork robloxstudio-mcp</span></div>
+    <h1><span class="l-en">Claude Code, driving Roblox Studio</span><span class="l-vi">Claude Code điều khiển Roblox Studio</span></h1>
+    <p class="lede"><span class="l-en">From a clean machine to an agent that builds, playtests and checks your own game — with whatever architecture your team prefers. No framework required or taught.</span><span class="l-vi">Từ một máy trắng đến một agent tự build, playtest và kiểm tra game của chính bạn, theo bất kỳ kiến trúc nào team bạn chọn. Không bắt buộc và cũng không dạy framework nào.</span></p>
+    <div class="facts">
+      <span class="l-en"><b>About 2½ hours</b> including a break</span><span class="l-vi"><b>Khoảng 2 tiếng rưỡi</b>, có giải lao</span>
+      <span><b>macOS / Windows</b></span>
+      <span class="l-en"><b>Bring</b> Studio signed in, Node 22+, git, a Claude plan with Claude Code</span><span class="l-vi"><b>Cần có</b> Studio đã đăng nhập, Node 22+, git, gói Claude có Claude Code</span>
+    </div>
+    <nav class="agenda" aria-label="Agenda">
+      <a href="#setup" data-mod="setup"><span class="n">1</span><span class="h"><span class="l-en">Setup</span><span class="l-vi">Cài đặt</span></span><span class="o"><span class="l-en">Studio shows <b>Connected</b></span><span class="l-vi">Studio hiện <b>Connected</b></span></span><span class="t">40 min</span><span class="tick" hidden>✓</span></a>
+      <a href="#first" data-mod="first"><span class="n">2</span><span class="h"><span class="l-en">First contact</span><span class="l-vi">Làm quen</span></span><span class="o"><span class="l-en">Read, edit, playtest, look</span><span class="l-vi">Đọc, sửa, playtest, xem</span></span><span class="t">30 min</span><span class="tick" hidden>✓</span></a>
+      <a href="#verify" data-mod="verify"><span class="n">3</span><span class="h"><span class="l-en">Trust, but verify</span><span class="l-vi">Tin, nhưng phải kiểm</span></span><span class="o"><span class="l-en">Numbers read back, not claims</span><span class="l-vi">Số liệu đọc lại, không phải lời hứa</span></span><span class="t">30 min</span><span class="tick" hidden>✓</span></a>
+      <a href="#game" data-mod="game"><span class="n">4</span><span class="h"><span class="l-en">Your own game</span><span class="l-vi">Game của bạn</span></span><span class="o">CLAUDE.md, LESSONS.md<span class="l-en">, one feature</span><span class="l-vi">, một tính năng</span></span><span class="t">40 min</span><span class="tick" hidden>✓</span></a>
+      <a href="#windows" data-mod="windows"><span class="n">5</span><span class="h"><span class="l-en">Windows check</span><span class="l-vi">Kiểm tra Windows</span></span><span class="o"><span class="l-en">A short report for the fork</span><span class="l-vi">Báo cáo ngắn cho bản fork</span></span><span class="t">10 min</span><span class="tick" hidden>✓</span></a>
+    </nav>
+  </div>
+</header>
+
+<div class="wrap layout">
+<nav class="toc" aria-label="Modules">
+  <ol>
+    <li><a href="#setup" data-mod="setup"><span class="n">1</span><span class="l-en">Setup</span><span class="l-vi">Cài đặt</span><span class="t">40′</span></a></li>
+    <li><a href="#first" data-mod="first"><span class="n">2</span><span class="l-en">First contact</span><span class="l-vi">Làm quen</span><span class="t">30′</span></a></li>
+    <li><a href="#verify" data-mod="verify"><span class="n">3</span><span class="l-en">Trust, but verify</span><span class="l-vi">Tin, nhưng phải kiểm</span><span class="t">30′</span></a></li>
+    <li><a href="#game" data-mod="game"><span class="n">4</span><span class="l-en">Your own game</span><span class="l-vi">Game của bạn</span><span class="t">40′</span></a></li>
+    <li><a href="#windows" data-mod="windows"><span class="n">5</span><span class="l-en">Windows check</span><span class="l-vi">Kiểm tra Windows</span><span class="t">10′</span></a></li>
+    <li><a href="#blocked"><span class="n">?</span><span class="l-en">Blocked?</span><span class="l-vi">Đang kẹt?</span><span class="t"></span></a></li>
+  </ol>
+  <div class="ref">
+    <a href="https://github.com/zAcherttp/robloxstudio-mcp/tree/main/docs/workshop"><span class="l-en">Workshop source</span><span class="l-vi">Mã nguồn workshop</span></a>
+    <a href="https://github.com/zAcherttp/robloxstudio-mcp/blob/main/docs/agent-guide.md"><span class="l-en">Agent guide</span><span class="l-vi">Hướng dẫn cho agent</span></a>
+    <a href="https://github.com/zAcherttp/robloxstudio-mcp/blob/main/docs/roblox-skills.md"><span class="l-en">Which skills to trust</span><span class="l-vi">Nên tin skill nào</span></a>
+  </div>
+</nav>
+
+<main>
+
+<!-- 1 -->
+<section class="mod" id="setup">
+  <div class="modhead"><span class="num">Module 1</span><h2><span class="l-en">Setup</span><span class="l-vi">Cài đặt</span></h2><span class="time">40 min</span></div>
+
+  <div class="l-en">
+    <p class="goal">Claude Code running, the MCP built from source, and Studio's plugin panel showing <b>Connected</b>. Most of the time is downloads.</p>
+    <div class="note"><b>Why build from source?</b> The npm package <code>@chrrxs/robloxstudio-mcp</code> is upstream's build, not this fork, and <code>npx …@latest</code> runs whatever was published last on every launch. A clone runs code you can read, updated when you choose.</div>
+    <h3>1.1 Install Claude Code</h3>
+  </div>
+  <div class="l-vi">
+    <p class="goal">Claude Code chạy được, MCP được build từ mã nguồn, và panel plugin trong Studio hiện <b>Connected</b>. Phần lớn thời gian là chờ tải.</p>
+    <div class="note"><b>Vì sao build từ mã nguồn?</b> Gói npm <code>@chrrxs/robloxstudio-mcp</code> là bản của upstream, không phải bản fork này, và <code>npx …@latest</code> chạy bản mới nhất vừa được publish mỗi lần khởi động. Clone về thì bạn chạy đúng code mình đọc được, và chỉ cập nhật khi bạn muốn.</div>
+    <h3>1.1 Cài Claude Code</h3>
+  </div>
+  <div data-os-only="mac"><div class="code has-lang"><span class="lang">Terminal</span><button class="copy" type="button">Copy</button><pre>curl -fsSL https://claude.ai/install.sh | bash</pre></div></div>
+  <div data-os-only="win"><div class="code has-lang"><span class="lang">PowerShell</span><button class="copy" type="button">Copy</button><pre>irm https://claude.ai/install.ps1 | iex</pre></div></div>
+  <p class="l-en">Run <code>claude</code> once and sign in. The Claude desktop app's <b>Code</b> tab uses the same MCP settings.</p>
+  <p class="l-vi">Chạy <code>claude</code> một lần và đăng nhập. Tab <b>Code</b> trong app Claude trên desktop dùng chung cấu hình MCP.</p>
+
+  <h3><span class="l-en">1.2 Build the MCP</span><span class="l-vi">1.2 Build MCP</span></h3>
+  <div data-os-only="mac"><div class="code has-lang"><span class="lang">Terminal</span><button class="copy" type="button">Copy</button><pre>mkdir -p ~/dev &amp;&amp; cd ~/dev
+git clone https://github.com/zAcherttp/robloxstudio-mcp.git
+cd robloxstudio-mcp
+npm install
+npm install --prefix studio-plugin
+npm run build
+npm run build:plugin</pre></div></div>
+  <div data-os-only="win"><div class="code has-lang"><span class="lang">PowerShell</span><button class="copy" type="button">Copy</button><pre>mkdir C:\dev -Force; cd C:\dev
+git clone https://github.com/zAcherttp/robloxstudio-mcp.git
+cd robloxstudio-mcp
+npm install
+npm install --prefix studio-plugin
+npm run build
+npm run build:plugin</pre></div></div>
+  <p class="l-en"><code>npm run build:plugin</code> also copies the plugin into Studio's Plugins folder (<code>~/Documents/Roblox/Plugins</code> on macOS, <code>%LOCALAPPDATA%\Roblox\Plugins</code> on Windows). Optional: <code>npm test</code> should end green; it never opens Studio.</p>
+  <p class="l-vi"><code>npm run build:plugin</code> cũng tự chép plugin vào thư mục Plugins của Studio (<code>~/Documents/Roblox/Plugins</code> trên macOS, <code>%LOCALAPPDATA%\Roblox\Plugins</code> trên Windows). Tuỳ chọn: <code>npm test</code> nên chạy xanh hết; lệnh này không mở Studio.</p>
+
+  <h3><span class="l-en">1.3 Register it with Claude Code</span><span class="l-vi">1.3 Đăng ký với Claude Code</span></h3>
+  <p class="l-en">Absolute path to your clone; <code>--scope user</code> makes it available in every project.</p>
+  <p class="l-vi">Dùng đường dẫn tuyệt đối tới thư mục clone; <code>--scope user</code> để dùng được trong mọi project.</p>
+  <div data-os-only="mac"><div class="code has-lang"><span class="lang">Terminal</span><button class="copy" type="button">Copy</button><pre>claude mcp add robloxstudio --scope user -- node ~/dev/robloxstudio-mcp/packages/robloxstudio-mcp/dist/index.js --auto-install-plugin</pre></div></div>
+  <div data-os-only="win"><div class="code has-lang"><span class="lang">PowerShell</span><button class="copy" type="button">Copy</button><pre>claude mcp add robloxstudio --scope user -- node C:/dev/robloxstudio-mcp/packages/robloxstudio-mcp/dist/index.js --auto-install-plugin</pre></div></div>
+  <p class="l-en"><code>--auto-install-plugin</code> re-copies your local plugin build when Studio's copy is missing or older. It never downloads anything. Check with <code>claude mcp list</code>.</p>
+  <p class="l-vi"><code>--auto-install-plugin</code> chép lại bản plugin bạn build khi Studio thiếu hoặc đang giữ bản cũ hơn. Nó không tải gì từ mạng. Kiểm tra bằng <code>claude mcp list</code>.</p>
+
+  <h3>1.4 Studio</h3>
+  <ul class="l-en">
+    <li><b>Fully quit and reopen Studio</b>; plugins load only at start. Open a Baseplate.</li>
+    <li><b>Plugins → MCP Server.</b> It says <b>Connected</b> while <code>claude</code> is running.</li>
+    <li>If Studio asks whether the plugin may reach <code>localhost</code> or inject scripts, allow it.</li>
+    <li>The panel's bottom line shows the plugin's and the server's build stamp. <b>Amber means they differ</b>: rebuild both, restart both.</li>
+  </ul>
+  <ul class="l-vi">
+    <li><b>Thoát hẳn Studio rồi mở lại</b>; plugin chỉ được nạp lúc khởi động. Mở một Baseplate.</li>
+    <li><b>Plugins → MCP Server.</b> Panel hiện <b>Connected</b> khi <code>claude</code> đang chạy.</li>
+    <li>Nếu Studio hỏi plugin có được truy cập <code>localhost</code> hay chèn script không, hãy cho phép.</li>
+    <li>Dòng cuối panel hiện build stamp của plugin và của server. <b>Màu vàng nghĩa là hai bản khác nhau</b>: build lại cả hai, khởi động lại cả hai.</li>
+  </ul>
+  <div data-os-only="mac">
+    <div class="note warn l-en"><b>macOS screenshots</b> need Screen Recording permission for the app that launched the server — your terminal or the Claude app: System Settings → Privacy &amp; Security → Screen &amp; System Audio Recording, then restart that app. The first screenshot after each start takes ~25 s while a helper compiles.</div>
+    <div class="note warn l-vi"><b>Chụp màn hình trên macOS</b> cần quyền Screen Recording cho app đã khởi động server (terminal của bạn hoặc app Claude): System Settings → Privacy &amp; Security → Screen &amp; System Audio Recording, rồi khởi động lại app đó. Ảnh đầu tiên sau mỗi lần khởi động mất khoảng 25 giây để biên dịch helper.</div>
+  </div>
+
+  <h3><span class="l-en">Check it works</span><span class="l-vi">Kiểm tra</span></h3>
+  <div class="prompt l-en"><button class="copy" type="button">Copy</button><p>Which Roblox Studio instances are connected? Then tell me the name of the place and how many parts are in Workspace.</p></div>
+  <div class="prompt l-vi"><button class="copy" type="button">Copy</button><p>Có những Roblox Studio nào đang kết nối? Sau đó cho mình biết tên place và số part trong Workspace.</p></div>
+  <p class="watch l-en">Watch for <code>get_connected_instances</code>, then <code>get_place_info</code> or <code>execute_luau</code>, and your place's real numbers.</p>
+  <p class="watch l-vi">Để ý các lệnh gọi <code>get_connected_instances</code>, rồi <code>get_place_info</code> hoặc <code>execute_luau</code>, và số liệu thật của place bạn.</p>
+
+  <h3><span class="l-en">If it goes wrong</span><span class="l-vi">Nếu có lỗi</span></h3>
+  <div class="tbl wrapfirst l-en"><table>
+    <thead><tr><th>Symptom</th><th>Fix</th></tr></thead>
+    <tbody>
+      <tr><td>Server shows as failed in <code>claude mcp list</code></td><td>Run the <code>node …/dist/index.js</code> command yourself to see the error. Usually a wrong path, or <code>npm run build</code> not run.</td></tr>
+      <tr><td>No <b>MCP Server</b> button</td><td>Studio was not fully restarted, or the plugin went elsewhere: copy <code>studio-plugin/MCPPlugin.rbxmx</code> into <b>Plugins → Plugins Folder</b>.</td></tr>
+      <tr><td>Panel says Disconnected</td><td>Normal until <code>claude</code> is running. Start it and wait a few seconds.</td></tr>
+      <tr><td>Stamps amber</td><td><code>npm run build &amp;&amp; npm run build:plugin</code>, then restart Studio and Claude Code.</td></tr>
+      <tr><td>Two MCP plugins in the folder</td><td>Keep only <code>MCPPlugin.rbxmx</code>.</td></tr>
+    </tbody>
+  </table></div>
+  <div class="tbl wrapfirst l-vi"><table>
+    <thead><tr><th>Triệu chứng</th><th>Cách sửa</th></tr></thead>
+    <tbody>
+      <tr><td>Server báo failed trong <code>claude mcp list</code></td><td>Tự chạy lệnh <code>node …/dist/index.js</code> để xem lỗi. Thường là sai đường dẫn, hoặc chưa chạy <code>npm run build</code>.</td></tr>
+      <tr><td>Không thấy nút <b>MCP Server</b></td><td>Studio chưa được khởi động lại hẳn, hoặc plugin nằm sai chỗ: chép <code>studio-plugin/MCPPlugin.rbxmx</code> vào <b>Plugins → Plugins Folder</b>.</td></tr>
+      <tr><td>Panel báo Disconnected</td><td>Bình thường khi <code>claude</code> chưa chạy. Mở nó lên và chờ vài giây.</td></tr>
+      <tr><td>Stamp màu vàng</td><td><code>npm run build &amp;&amp; npm run build:plugin</code>, rồi khởi động lại Studio và Claude Code.</td></tr>
+      <tr><td>Có hai plugin MCP trong thư mục</td><td>Chỉ giữ <code>MCPPlugin.rbxmx</code>.</td></tr>
+    </tbody>
+  </table></div>
+  <div class="donebar" data-done-for="setup"></div>
+</section>
+
+<!-- 2 -->
+<section class="mod" id="first">
+  <div class="modhead"><span class="num">Module 2</span><h2><span class="l-en">First contact</span><span class="l-vi">Làm quen</span></h2><span class="time">30 min</span></div>
+  <p class="goal l-en">Watch the agent read a place, change it, playtest it and look at it. Read the tool calls, not only the answers — that is the skill here. Use a throwaway Baseplate.</p>
+  <p class="goal l-vi">Xem agent đọc một place, sửa nó, playtest và nhìn nó. Hãy đọc các lệnh gọi tool chứ không chỉ câu trả lời, đó chính là kỹ năng cần học. Dùng một Baseplate để thử, hỏng cũng không sao.</p>
+
+  <h3><span class="l-en">Read</span><span class="l-vi">Đọc</span></h3>
+  <div class="prompt l-en"><button class="copy" type="button">Copy</button><p>Describe this place: what services have children, what is in Workspace, and whether there are any scripts.</p></div>
+  <div class="prompt l-vi"><button class="copy" type="button">Copy</button><p>Mô tả place này: service nào có con, trong Workspace có gì, và có script nào không.</p></div>
+  <p class="watch"><code>get_project_structure</code>, <code>search_objects</code>, <code>get_instance_properties</code> — <span class="l-en">read-only.</span><span class="l-vi">chỉ đọc.</span></p>
+
+  <h3><span class="l-en">Build in edit mode</span><span class="l-vi">Build trong edit mode</span></h3>
+  <div class="prompt l-en"><button class="copy" type="button">Copy</button><p>In Workspace, make a 10×1×10 anchored neon platform 20 studs above the spawn, and a Script that makes it slowly change colour through the rainbow. Keep the script short.</p></div>
+  <div class="prompt l-vi"><button class="copy" type="button">Copy</button><p>Trong Workspace, tạo một platform neon 10×1×10, anchored, cao hơn điểm spawn 20 stud, và một Script làm nó đổi màu chậm theo cầu vồng. Viết script ngắn thôi.</p></div>
+  <p class="watch l-en">Edit-mode changes undo with Ctrl/Cmd+Z in Studio.</p>
+  <p class="watch l-vi">Thay đổi trong edit mode có thể hoàn tác bằng Ctrl/Cmd+Z trong Studio.</p>
+
+  <h3><span class="l-en">Playtest and read back</span><span class="l-vi">Playtest và đọc lại</span></h3>
+  <div class="prompt l-en"><button class="copy" type="button">Copy</button><p>Start a solo playtest. Check the output for errors, and tell me the platform's colour twice, a second apart, from the server. Then stop the playtest and confirm it stopped.</p></div>
+  <div class="prompt l-vi"><button class="copy" type="button">Copy</button><p>Bắt đầu solo playtest. Kiểm tra output xem có lỗi không, và đọc màu của platform từ server hai lần, cách nhau một giây. Sau đó dừng playtest và xác nhận là đã dừng.</p></div>
+  <p class="watch l-en"><code>solo_playtest</code>, <code>get_runtime_logs</code>, <code>eval_server_runtime</code>. Two different colours prove the script runs. <b>Edit mode and a playtest are different DataModels</b>: <code>execute_luau</code> without a <code>target</code> cannot see the running game.</p>
+  <p class="watch l-vi"><code>solo_playtest</code>, <code>get_runtime_logs</code>, <code>eval_server_runtime</code>. Hai màu khác nhau chứng minh script đang chạy. <b>Edit mode và playtest là hai DataModel khác nhau</b>: <code>execute_luau</code> không có <code>target</code> thì không thấy được game đang chạy.</p>
+
+  <h3><span class="l-en">Look at it</span><span class="l-vi">Nhìn kết quả</span></h3>
+  <div class="prompt l-en"><button class="copy" type="button">Copy</button><p>Start a playtest again, frame the platform, and take a screenshot.</p></div>
+  <div class="prompt l-vi"><button class="copy" type="button">Copy</button><p>Bắt đầu playtest lại, căn camera vào platform và chụp màn hình.</p></div>
+
+  <h3><span class="l-en">Break it on purpose</span><span class="l-vi">Cố tình làm hỏng</span></h3>
+  <div class="prompt l-en"><button class="copy" type="button">Copy</button><p>Change the script so it errors after 3 seconds. Playtest, find the error in the logs, fix it, and prove it is fixed.</p></div>
+  <div class="prompt l-vi"><button class="copy" type="button">Copy</button><p>Sửa script để nó báo lỗi sau 3 giây. Playtest, tìm lỗi trong log, sửa nó, và chứng minh là đã sửa xong.</p></div>
+  <p class="l-en">That is the loop for the rest of the day: <b>change → run → read back → decide</b>.</p>
+  <p class="l-vi">Đây là vòng lặp cho cả buổi: <b>sửa → chạy → đọc lại → quyết định</b>.</p>
+
+  <h3><span class="l-en">More in the box</span><span class="l-vi">Còn nhiều tool khác</span></h3>
+  <div class="tbl"><table>
+    <thead><tr><th>Tool</th><th><span class="l-en">For</span><span class="l-vi">Dùng để</span></th></tr></thead>
+    <tbody>
+      <tr><td><code>multiplayer_playtest</code></td><td><span class="l-en">a server and several clients in one Studio</span><span class="l-vi">một server và nhiều client trong cùng một Studio</span></td></tr>
+      <tr><td><code>simulate_keyboard_input</code> · <code>simulate_mouse_input</code></td><td><span class="l-en">keys and clicks in a running game</span><span class="l-vi">bấm phím và click trong game đang chạy</span></td></tr>
+      <tr><td><code>set_device_simulator</code> · <code>capture_device_matrix</code></td><td><span class="l-en">UI on phone, tablet and console layouts</span><span class="l-vi">UI trên điện thoại, máy tính bảng và console</span></td></tr>
+      <tr><td><code>capture_script_profiler</code> · <code>capture_micro_profiler</code></td><td><span class="l-en">where frame time goes</span><span class="l-vi">thời gian mỗi frame đi đâu</span></td></tr>
+      <tr><td><code>get_memory_breakdown</code> · <code>capture_heap_snapshot</code></td><td><span class="l-en">where memory goes, and what grew</span><span class="l-vi">bộ nhớ đi đâu, và cái gì tăng lên</span></td></tr>
+      <tr><td><code>search_assets</code> · <code>preview_asset</code> · <code>insert_asset</code></td><td><span class="l-en">Creator Store, scripts stripped on insert</span><span class="l-vi">Creator Store, script bị gỡ khi chèn vào</span></td></tr>
+      <tr><td><code>get_roblox_docs</code> · <code>get_roblox_skills</code></td><td><span class="l-en">official API pages; Roblox's own skills</span><span class="l-vi">tài liệu API chính thức; skill của chính Roblox</span></td></tr>
+      <tr><td><code>get_project_lessons</code></td><td><span class="l-en">engine traps, plus your project's <code>LESSONS.md</code></span><span class="l-vi">các bẫy của engine, cộng với <code>LESSONS.md</code> của project bạn</span></td></tr>
+    </tbody>
+  </table></div>
+  <div class="donebar" data-done-for="first"></div>
+</section>
+
+<!-- 3 -->
+<section class="mod" id="verify">
+  <div class="modhead"><span class="num">Module 3</span><h2><span class="l-en">Trust, but verify</span><span class="l-vi">Tin, nhưng phải kiểm</span></h2><span class="time">30 min</span></div>
+  <p class="goal l-en">"Done" is what the agent believes. A value read back from the running game is what is true. Make asking for the number a reflex.</p>
+  <p class="goal l-vi">"Xong rồi" là điều agent tin. Một giá trị đọc lại từ game đang chạy mới là sự thật. Hãy tập thói quen luôn đòi xem số liệu.</p>
+
+  <h3><span class="l-en">Claims versus readbacks</span><span class="l-vi">Lời khẳng định và số liệu đọc lại</span></h3>
+  <div class="prompt l-en"><button class="copy" type="button">Copy</button><p>Add a part that launches a player upward when they touch it. Then prove it works without me playing.</p></div>
+  <div class="prompt l-vi"><button class="copy" type="button">Copy</button><p>Thêm một part bắn người chơi lên cao khi họ chạm vào. Sau đó chứng minh nó hoạt động mà không cần mình chơi thử.</p></div>
+  <p class="l-en">A good answer starts a playtest, moves the character onto the pad <b>from the server</b>, reads its height back <b>on the client</b> several times, and reports the peak. A weak answer describes the code. If it walks the character from the client, nothing moves: the control script rewrites <code>Humanoid.MoveDirection</code> every frame.</p>
+  <p class="l-vi">Câu trả lời tốt sẽ bắt đầu playtest, di chuyển nhân vật lên pad <b>từ phía server</b>, đọc lại độ cao <b>ở phía client</b> vài lần, và báo độ cao tối đa. Câu trả lời yếu chỉ mô tả code. Nếu nó cho nhân vật đi từ phía client thì sẽ không có gì chuyển động: control script ghi đè <code>Humanoid.MoveDirection</code> mỗi frame.</p>
+
+  <h3>Arm, trigger, read</h3>
+  <p class="l-en">A launch is over in half a second; one read afterwards misses it. Arm a sampler on the client that keeps the peak in <code>_G</code>, trigger from the server, read the peak back.</p>
+  <p class="l-vi">Một cú bắn kết thúc trong nửa giây; đọc một lần sau đó sẽ bỏ lỡ. Cài sẵn (arm) một bộ lấy mẫu ở client giữ giá trị lớn nhất trong <code>_G</code>, kích hoạt (trigger) từ server, rồi đọc (read) lại giá trị đó.</p>
+  <div class="prompt l-en"><button class="copy" type="button">Copy</button><p>Measure the launch pad's peak height with an arm–trigger–read probe, three times.</p></div>
+  <div class="prompt l-vi"><button class="copy" type="button">Copy</button><p>Đo độ cao tối đa của launch pad bằng probe arm–trigger–read, ba lần.</p></div>
+  <p class="l-en">Three numbers that roughly agree are a measurement. Three identical to the decimal usually mean the trigger never landed.</p>
+  <p class="l-vi">Ba con số gần giống nhau là một phép đo. Ba con số giống hệt đến từng chữ số thập phân thường có nghĩa là trigger chưa hề chạy.</p>
+
+  <h3><span class="l-en">Give each feature a way in</span><span class="l-vi">Cho mỗi tính năng một lối vào</span></h3>
+  <p class="l-en">One function per feature, Studio-only, calling <b>the same server code as player input</b>. Not a framework — a door the agent can open.</p>
+  <p class="l-vi">Mỗi tính năng một hàm, chỉ chạy trong Studio, gọi <b>đúng đoạn code server mà input của người chơi gọi</b>. Không phải framework, chỉ là một cánh cửa để agent mở.</p>
+  <div class="code has-lang"><span class="lang">Luau</span><button class="copy" type="button">Copy</button><pre>-- ServerScriptService/DebugCommands
+if not game:GetService("RunService"):IsStudio() then return end
+_G.Debug = {
+	launch = function(player)
+		return LaunchPad.launch(player.Character) -- the same call the Touched handler makes
+	end,
+}</pre></div>
+
+  <h3><span class="l-en">Traps worth knowing by name</span><span class="l-vi">Những cái bẫy nên nhớ tên</span></h3>
+  <ul class="l-en">
+    <li>A write to a property the engine owns reverts within a frame (<code>Motor6D.Transform</code>, <code>LocalTransparencyModifier</code>). Write, wait a frame, read back.</li>
+    <li>Studio caches <code>require</code>: an edited ModuleScript can return its old table even after a restart. Require a clone.</li>
+    <li>An eval longer than ~30 s times out and keeps running with its result lost. <code>task.spawn</code> it, poll <code>_G</code>.</li>
+    <li><code>solo_playtest stop</code> has reported success while the game ran on. Check <code>status</code>.</li>
+    <li>Changing one attribute resends every attribute on that instance.</li>
+  </ul>
+  <ul class="l-vi">
+    <li>Ghi vào một property mà engine quản lý sẽ bị trả về trong vòng một frame (<code>Motor6D.Transform</code>, <code>LocalTransparencyModifier</code>). Ghi, chờ một frame, rồi đọc lại.</li>
+    <li>Studio cache <code>require</code>: một ModuleScript vừa sửa vẫn có thể trả về table cũ, kể cả sau khi khởi động lại. Hãy require một bản clone.</li>
+    <li>Một lệnh eval dài hơn khoảng 30 giây sẽ timeout nhưng vẫn chạy tiếp và mất kết quả. Dùng <code>task.spawn</code>, rồi hỏi lại <code>_G</code>.</li>
+    <li><code>solo_playtest stop</code> từng báo thành công trong khi game vẫn chạy. Kiểm tra lại bằng <code>status</code>.</li>
+    <li>Đổi một attribute là gửi lại toàn bộ attribute của instance đó.</li>
+  </ul>
+  <p class="l-en">All of these, one line each, come from <code>get_project_lessons</code>. The long form with measurements is the <a href="https://github.com/zAcherttp/robloxstudio-mcp/blob/main/docs/agent-guide.md">agent guide</a>.</p>
+  <p class="l-vi">Tất cả những điều này, mỗi điều một dòng, có trong <code>get_project_lessons</code>. Bản đầy đủ kèm số liệu đo đạc nằm trong <a href="https://github.com/zAcherttp/robloxstudio-mcp/blob/main/docs/agent-guide.md">hướng dẫn cho agent</a>.</p>
+  <div class="note l-en">An agent cannot judge feel, readability at a glance, or a real phone in someone's hand. It brings you numbers and a screenshot; the call is yours.</div>
+  <div class="note l-vi">Agent không đánh giá được cảm giác chơi, việc nhìn qua có hiểu ngay không, hay trải nghiệm trên một chiếc điện thoại thật. Nó mang về số liệu và ảnh chụp; quyết định là của bạn.</div>
+  <div class="donebar" data-done-for="verify"></div>
+</section>
+
+<!-- 4 -->
+<section class="mod" id="game">
+  <div class="modhead"><span class="num">Module 4</span><h2><span class="l-en">Your own game</span><span class="l-vi">Game của bạn</span></h2><span class="time">40 min</span></div>
+  <p class="goal l-en">A repository an agent can work in from the first prompt, and one small feature built end to end. You choose the architecture; two files carry what the agent needs.</p>
+  <p class="goal l-vi">Một repository mà agent làm việc được ngay từ prompt đầu tiên, và một tính năng nhỏ được làm trọn vẹn. Bạn tự chọn kiến trúc; hai file sẽ chứa những gì agent cần biết.</p>
+
+  <h3><span class="l-en">How code reaches Studio — pick one</span><span class="l-vi">Code vào Studio bằng cách nào — chọn một</span></h3>
+  <div class="tbl wrapfirst"><table>
+    <thead><tr><th><span class="l-en">Choice</span><span class="l-vi">Lựa chọn</span></th><th><span class="l-en">When</span><span class="l-vi">Khi nào</span></th></tr></thead>
+    <tbody>
+      <tr><td><b><span class="l-en">Edit in Studio</span><span class="l-vi">Sửa trực tiếp trong Studio</span></b></td><td><span class="l-en">Fastest start. The agent edits scripts in place; the place file is the source of truth.</span><span class="l-vi">Bắt đầu nhanh nhất. Agent sửa script tại chỗ; file place là nguồn chuẩn.</span></td></tr>
+      <tr><td><b>Studio Script Sync</b></td><td><span class="l-en">Explorer → right-click → sync to a folder. Scripts become files git can track, no extra tools.</span><span class="l-vi">Explorer → chuột phải → sync ra một thư mục. Script thành file mà git theo dõi được, không cần thêm công cụ.</span></td></tr>
+      <tr><td><b>Rojo</b></td><td><span class="l-en">The whole tree from files. Best for a team that reviews code.</span><span class="l-vi">Toàn bộ cây instance từ file. Hợp nhất với team có review code.</span></td></tr>
+    </tbody>
+  </table></div>
+
+  <h3><code>CLAUDE.md</code> — <span class="l-en">how this game is built, run and checked</span><span class="l-vi">game này được build, chạy và kiểm tra thế nào</span></h3>
+  <p class="l-en">Read at the start of every session, so keep it short. It answers: what the game is in two sentences; how code reaches Studio; how the agent drives a feature without clicking; how a change is verified; what it must never do. Template: <a href="https://github.com/zAcherttp/robloxstudio-mcp/blob/main/docs/workshop/templates/CLAUDE.md">templates/CLAUDE.md</a>.</p>
+  <p class="l-vi">File này được đọc ở đầu mỗi phiên, nên hãy viết ngắn. Nó trả lời: game là gì (hai câu); code vào Studio bằng cách nào; agent điều khiển một tính năng mà không cần click ra sao; một thay đổi được kiểm chứng thế nào; và những gì tuyệt đối không được làm. Mẫu: <a href="https://github.com/zAcherttp/robloxstudio-mcp/blob/main/docs/workshop/templates/CLAUDE.md">templates/CLAUDE.md</a>.</p>
+
+  <h3><code>LESSONS.md</code> — <span class="l-en">what cost you time</span><span class="l-vi">những gì đã làm bạn mất thời gian</span></h3>
+  <p class="l-en">Every half hour lost to something becomes one line. <code>get_project_lessons</code> serves it next to the engine lessons, re-read on every call, from the folder you started <code>claude</code> in.</p>
+  <p class="l-vi">Mỗi lần mất nửa tiếng vì một chuyện gì đó, hãy thêm một dòng. <code>get_project_lessons</code> trả file này cùng với các bài học về engine, đọc lại ở mỗi lần gọi, từ thư mục bạn chạy <code>claude</code>.</p>
+  <div class="code has-lang"><span class="lang">LESSONS.md</span><button class="copy" type="button">Copy</button><pre>NET       Our round-state RemoteEvent fires before the client's UI exists
+          → the client asks for the current state on start, then listens</pre></div>
+
+  <h3><span class="l-en">Build one feature</span><span class="l-vi">Làm một tính năng</span></h3>
+  <p class="l-en">Small, with a rule you can check: a coin that adds to a leaderstat, a door that opens for one team, a round timer.</p>
+  <p class="l-vi">Nhỏ thôi, có một quy tắc kiểm tra được: đồng xu cộng điểm vào leaderstat, cánh cửa chỉ mở cho một team, đồng hồ đếm giờ cho mỗi round.</p>
+  <div class="prompt l-en"><button class="copy" type="button">Copy</button><p>Read CLAUDE.md and call get_project_lessons. Then build [feature]. Give it a Studio-only debug entry point that calls the same server code as player input. Playtest it, read the result back, and show me the numbers.</p></div>
+  <div class="prompt l-vi"><button class="copy" type="button">Copy</button><p>Đọc CLAUDE.md và gọi get_project_lessons. Sau đó làm [tính năng]. Thêm một debug entry point chỉ chạy trong Studio, gọi đúng đoạn code server mà input của người chơi gọi. Playtest, đọc lại kết quả và cho mình xem số liệu.</p></div>
+
+  <h3>Skills</h3>
+  <p class="l-en">For depth on one topic — input, streaming, analytics, purchases — start with Roblox's own skills: ask Claude to run <code>get_roblox_skills</code>. Of the community packs, <a href="https://github.com/gamedev-skills/awesome-gamedev-agent-skills">gamedev-skills</a> checked out as accurate; <a href="https://github.com/zAcherttp/robloxstudio-mcp/blob/main/docs/roblox-skills.md">roblox-skills.md</a> has the details and the one to avoid.</p>
+  <p class="l-vi">Khi cần đi sâu một chủ đề (input, streaming, analytics, mua bán), hãy bắt đầu với skill của chính Roblox: bảo Claude chạy <code>get_roblox_skills</code>. Trong các bộ skill cộng đồng, <a href="https://github.com/gamedev-skills/awesome-gamedev-agent-skills">gamedev-skills</a> đã được kiểm tra là chính xác; <a href="https://github.com/zAcherttp/robloxstudio-mcp/blob/main/docs/roblox-skills.md">roblox-skills.md</a> có chi tiết, kèm bộ nên tránh.</p>
+
+  <h3><span class="l-en">Habits that pay</span><span class="l-vi">Những thói quen đáng giữ</span></h3>
+  <ul class="l-en">
+    <li><b>One task per session.</b> A fresh <code>claude</code> for an unrelated task.</li>
+    <li><b>Plan first</b> on anything bigger than a function: "plan it, don't write code yet".</li>
+    <li><b>Commit before a big change</b>, so undo is <code>git checkout</code>.</li>
+    <li><b>Say what "done" means</b>: the number you want, the screenshot you want.</li>
+    <li><b>Never paste secrets</b> — Open Cloud keys, cookies — into a prompt or <code>CLAUDE.md</code>.</li>
+  </ul>
+  <ul class="l-vi">
+    <li><b>Mỗi phiên một việc.</b> Việc không liên quan thì mở <code>claude</code> mới.</li>
+    <li><b>Lên kế hoạch trước</b> với mọi thứ lớn hơn một hàm: "lên kế hoạch, chưa viết code".</li>
+    <li><b>Commit trước khi thay đổi lớn</b>, để hoàn tác chỉ là <code>git checkout</code>.</li>
+    <li><b>Nói rõ "xong" nghĩa là gì</b>: con số bạn muốn thấy, ảnh chụp bạn muốn xem.</li>
+    <li><b>Không bao giờ dán bí mật</b> (Open Cloud key, cookie) vào prompt hay <code>CLAUDE.md</code>.</li>
+  </ul>
+  <div class="donebar" data-done-for="game"></div>
+</section>
+
+<!-- 5 -->
+<section class="mod" id="windows">
+  <div class="modhead"><span class="num">Module 5</span><h2><span class="l-en">Windows check</span><span class="l-vi">Kiểm tra Windows</span></h2><span class="time">10 min · <span class="l-en">Windows only</span><span class="l-vi">chỉ Windows</span></span></div>
+  <p class="goal l-en">CI builds and tests the fork on Windows, but nobody has driven a live Studio on Windows with it yet. Tick what worked, then press <b>Open as an issue</b>: it opens a pre-filled issue on the team board, ready to submit.</p>
+  <p class="goal l-vi">CI đã build và test bản fork trên Windows, nhưng chưa ai điều khiển Studio thật trên Windows với nó. Đánh dấu những gì chạy được, rồi bấm <b>Mở thành issue</b>: một issue đã điền sẵn sẽ mở trên bảng issue của team, chỉ cần bấm gửi.</p>
+
+  <div id="checklist">
+    <div class="checkgroup">Build</div>
+    <ul class="check">
+      <li><input type="checkbox" id="c-install"><label for="c-install"><code>npm install</code> &amp; <code>npm install --prefix studio-plugin</code></label></li>
+      <li><input type="checkbox" id="c-build"><label for="c-build"><code>npm run build</code> — <code>build-info.json</code> <span class="l-en">appears at the repo root</span><span class="l-vi">xuất hiện ở thư mục gốc repo</span></label></li>
+      <li><input type="checkbox" id="c-plugin"><label for="c-plugin"><code>npm run build:plugin</code> — <span class="l-en">the plugin lands in</span><span class="l-vi">plugin nằm trong</span> <code>%LOCALAPPDATA%\Roblox\Plugins</code></label></li>
+      <li><input type="checkbox" id="c-test"><label for="c-test"><code>npm test</code> <span class="l-en">ends without a failure</span><span class="l-vi">chạy xong không lỗi</span></label></li>
+    </ul>
+    <div class="checkgroup"><span class="l-en">Connect</span><span class="l-vi">Kết nối</span></div>
+    <ul class="check">
+      <li><input type="checkbox" id="c-list"><label for="c-list"><code>claude mcp list</code> <span class="l-en">shows robloxstudio connected</span><span class="l-vi">hiện robloxstudio đã kết nối</span></label></li>
+      <li><input type="checkbox" id="c-panel"><label for="c-panel"><span class="l-en">Studio's MCP Server panel says Connected</span><span class="l-vi">Panel MCP Server trong Studio hiện Connected</span></label></li>
+      <li><input type="checkbox" id="c-stamp"><label for="c-stamp"><span class="l-en">The two build stamps match (not amber)</span><span class="l-vi">Hai build stamp khớp nhau (không có màu vàng)</span></label></li>
+    </ul>
+    <div class="checkgroup"><span class="l-en">Tools — ask Claude to run each</span><span class="l-vi">Tool — nhờ Claude chạy từng cái</span></div>
+    <ul class="check">
+      <li><input type="checkbox" id="c-inst"><label for="c-inst"><code>get_connected_instances</code> <span class="l-en">lists this Studio</span><span class="l-vi">liệt kê Studio này</span></label></li>
+      <li><input type="checkbox" id="c-luau"><label for="c-luau"><code>execute_luau</code> <span class="l-en">returns a value in edit mode</span><span class="l-vi">trả về giá trị trong edit mode</span></label></li>
+      <li><input type="checkbox" id="c-play"><label for="c-play"><code>solo_playtest</code> start, status, stop</label></li>
+      <li><input type="checkbox" id="c-eval"><label for="c-eval"><code>eval_server_runtime</code> &amp; <code>eval_client_runtime</code> <span class="l-en">during a playtest</span><span class="l-vi">trong lúc playtest</span></label></li>
+      <li><input type="checkbox" id="c-logs"><label for="c-logs"><code>get_runtime_logs</code> <span class="l-en">shows server output</span><span class="l-vi">hiện output của server</span></label></li>
+      <li><input type="checkbox" id="c-shot-edit"><label for="c-shot-edit"><code>capture_screenshot</code> <span class="l-en">in edit mode</span><span class="l-vi">trong edit mode</span></label></li>
+      <li><input type="checkbox" id="c-shot-play"><label for="c-shot-play"><code>capture_screenshot</code> <span class="l-en">during a playtest</span><span class="l-vi">trong lúc playtest</span></label></li>
+      <li><input type="checkbox" id="c-heap"><label for="c-heap"><code>capture_heap_snapshot</code> target "server" <span class="l-en">writes a file and a summary</span><span class="l-vi">ghi ra file và trả tóm tắt</span></label></li>
+      <li><input type="checkbox" id="c-lessons"><label for="c-lessons"><code>get_project_lessons</code> <span class="l-en">returns the engine lessons</span><span class="l-vi">trả về các bài học về engine</span></label></li>
+    </ul>
+    <label for="c-notes" class="checkgroup" style="display:block"><span class="l-en">Anything odd — paste errors here</span><span class="l-vi">Có gì lạ thì dán lỗi vào đây</span></label>
+    <textarea id="c-notes" rows="4" maxlength="2000" style="width:100%;margin-top:6px;font:13.5px/1.5 var(--mono);padding:10px;border:1px solid var(--line);border-radius:6px;background:var(--surface);color:var(--ink)"></textarea>
+    <div class="row">
+      <button class="btn" type="button" id="copy-report"><span class="l-en">Copy report</span><span class="l-vi">Copy báo cáo</span></button>
+      <a class="btn ghost" id="win-issue" target="_blank" rel="noopener" href="https://github.com/SE370-Team1/framework/issues/new"><span class="l-en">Open as an issue</span><span class="l-vi">Mở thành issue</span></a>
+      <button class="btn ghost" type="button" id="reset-report"><span class="l-en">Clear ticks</span><span class="l-vi">Xoá lựa chọn</span></button>
+      <span class="status" id="report-status" role="status"></span>
+    </div>
+    <pre id="report-fallback" hidden style="margin-top:12px;padding:12px;border:1px solid var(--line);border-radius:6px;background:var(--surface);overflow-x:auto;font:12.5px/1.5 var(--mono)"></pre>
+  </div>
+  <p class="watch l-en">In the issue, fill in: Windows version, <code>node -v</code>, Studio version, and <code>git rev-parse --short HEAD</code>.</p>
+  <p class="watch l-vi">Trong issue, điền thêm: phiên bản Windows, <code>node -v</code>, phiên bản Studio, và <code>git rev-parse --short HEAD</code>.</p>
+  <div class="donebar" data-done-for="windows"></div>
+</section>
+
+<!-- Blocked -->
+<section class="mod" id="blocked">
+  <div class="modhead"><span class="num">?</span><h2><span class="l-en">Blocked?</span><span class="l-vi">Đang kẹt?</span></h2></div>
+  <p class="goal l-en">Anything that stops you — an error, a step that doesn't match what you see, a question you can't answer — goes on the team's board, one issue per problem. Fill this in and GitHub opens the issue ready to submit; it lands on the SE370 Team 1 project board.</p>
+  <p class="goal l-vi">Bất cứ thứ gì làm bạn dừng lại (một lỗi, một bước không giống những gì bạn thấy, một câu hỏi chưa có lời đáp) đều đưa lên bảng của team, mỗi vấn đề một issue. Điền form này, GitHub sẽ mở sẵn issue để bạn gửi; issue sẽ tự vào bảng dự án SE370 Team 1.</p>
+  <div class="form">
+    <div>
+      <label for="b-module"><span class="l-en">Module</span><span class="l-vi">Module</span></label>
+      <select id="b-module">
+        <option value="1. Setup">1 · Setup / Cài đặt</option>
+        <option value="2. First contact">2 · First contact / Làm quen</option>
+        <option value="3. Trust, but verify">3 · Trust, but verify / Tin, nhưng phải kiểm</option>
+        <option value="4. Your own game">4 · Your own game / Game của bạn</option>
+        <option value="5. Windows check">5 · Windows check / Kiểm tra Windows</option>
+        <option value="Other">Other / Khác</option>
+      </select>
+    </div>
+    <div>
+      <label for="b-what"><span class="l-en">What happened — paste the error</span><span class="l-vi">Chuyện gì xảy ra — dán lỗi vào đây</span></label>
+      <textarea id="b-what" rows="5" maxlength="3000"></textarea>
+    </div>
+    <div>
+      <label for="b-tried"><span class="l-en">What you already tried</span><span class="l-vi">Bạn đã thử những gì</span></label>
+      <textarea id="b-tried" rows="3" maxlength="1500"></textarea>
+    </div>
+    <div class="row" style="margin-top:0">
+      <a class="btn" id="b-open" target="_blank" rel="noopener" href="https://github.com/SE370-Team1/framework/issues/new"><span class="l-en">Open issue on GitHub</span><span class="l-vi">Mở issue trên GitHub</span></a>
+      <a class="btn ghost" target="_blank" rel="noopener" href="https://github.com/orgs/SE370-Team1/projects/2"><span class="l-en">See the team board</span><span class="l-vi">Xem bảng của team</span></a>
+    </div>
+    <p class="meta l-en">The board is <code>SE370-Team1/framework</code>, a private repository: GitHub shows 404 until you're a member, so ask the facilitator. Your operating system comes from the switch at the top. Remove API keys and cookies before pasting anything.</p>
+    <p class="meta l-vi">Bảng issue là <code>SE370-Team1/framework</code>, một repository riêng tư: GitHub sẽ báo 404 nếu bạn chưa là thành viên, hãy nhờ người hướng dẫn thêm vào. Hệ điều hành lấy theo nút chuyển ở trên cùng. Xoá API key và cookie trước khi dán bất cứ thứ gì.</p>
+  </div>
+</section>
+
+
+</main>
+</div>
+
+<footer><span class="l-en">Built from the</span><span class="l-vi">Được dựng từ</span> <a href="https://github.com/zAcherttp/robloxstudio-mcp">robloxstudio-mcp fork</a> · <code>docs/workshop</code><span class="l-en">, which stays the source of truth. Engine behaviour checked in Studio, September 2026.</span><span class="l-vi">, nơi vẫn là nguồn chuẩn. Hành vi của engine được kiểm tra trong Studio, tháng 9/2026.</span></footer>
+
+<script>
+(function(){
+  var T = {
+    en: { copied:'Report copied. Paste it into a new issue on the fork.', copyBox:'Copy it from the box below.', cleared:'Cleared.', selected:'Selected — press Ctrl/Cmd+C' },
+    vi: { copied:'Đã copy báo cáo. Dán vào một issue mới trên bản fork.', copyBox:'Copy từ ô bên dưới.', cleared:'Đã xoá.', selected:'Đã chọn — nhấn Ctrl/Cmd+C' }
+  };
+  var store = {
+    get: function(k){ try { return localStorage.getItem(k); } catch(e){ return null; } },
+    set: function(k,v){ try { localStorage.setItem(k,v); } catch(e){} }
+  };
+  var lang = 'en';
+  function t(k){ return (T[lang] && T[lang][k]) || T.en[k]; }
+
+  // Language and OS, remembered in this browser
+  function setLang(l){
+    lang = l === 'vi' ? 'vi' : 'en';
+    document.body.setAttribute('data-lang', lang);
+    document.documentElement.lang = lang;
+    document.querySelectorAll('button[data-lang]').forEach(function(b){ b.setAttribute('aria-pressed', String(b.dataset.lang === lang)); });
+    store.set('workshop-lang', lang);
+  }
+  function setOS(os){
+    document.body.setAttribute('data-os', os);
+    document.querySelectorAll('button[data-os]').forEach(function(b){ b.setAttribute('aria-pressed', String(b.dataset.os === os)); });
+    store.set('workshop-os', os);
+  }
+  document.querySelectorAll('button[data-lang]').forEach(function(b){ b.addEventListener('click', function(){ setLang(b.dataset.lang); }); });
+  document.querySelectorAll('button[data-os]').forEach(function(b){ b.addEventListener('click', function(){ setOS(b.dataset.os); }); });
+  setLang(store.get('workshop-lang') || ((navigator.language || '').toLowerCase().indexOf('vi') === 0 ? 'vi' : 'en'));
+  setOS(store.get('workshop-os') || (/Win/i.test(navigator.platform || navigator.userAgent) ? 'win' : 'mac'));
+
+  // Copy buttons
+  document.querySelectorAll('.copy').forEach(function(btn){
+    btn.addEventListener('click', function(){
+      var host = btn.parentElement, src = host.querySelector('pre') || host.querySelector('p');
+      var text = src.innerText.trim();
+      var ok = function(){ btn.textContent = '✓'; setTimeout(function(){ btn.textContent = 'Copy'; }, 1400); };
+      var fail = function(){ var r = document.createRange(); r.selectNodeContents(src); var s = window.getSelection(); s.removeAllRanges(); s.addRange(r); btn.textContent = t('selected'); };
+      if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(text).then(ok, fail); else fail();
+    });
+  });
+
+  // Windows checklist, remembered in this browser
+  var boxes = document.querySelectorAll('#checklist input[type=checkbox]');
+  var notes = document.getElementById('c-notes');
+  var saved = {};
+  try { saved = JSON.parse(store.get('workshop-windows') || '{}') || {}; } catch(e){ saved = {}; }
+  boxes.forEach(function(b){ b.checked = !!saved[b.id]; });
+  notes.value = saved.notes || '';
+  function save(){
+    var s = { notes: notes.value };
+    boxes.forEach(function(b){ s[b.id] = b.checked; });
+    store.set('workshop-windows', JSON.stringify(s));
+  }
+  boxes.forEach(function(b){ b.addEventListener('change', save); });
+  notes.addEventListener('input', save);
+
+  function report(){
+    var lines = ['Windows check', '', 'Windows version:', 'Node (node -v):', 'Studio version:', 'Fork commit (git rev-parse --short HEAD):', ''];
+    document.querySelectorAll('#checklist .checkgroup, #checklist .check li').forEach(function(el){
+      if (el.classList.contains('checkgroup')){ if (el.tagName !== 'LABEL') lines.push('', el.innerText.trim()); return; }
+      var box = el.querySelector('input');
+      lines.push((box.checked ? '[x] ' : '[ ] ') + el.querySelector('label').innerText.trim());
+    });
+    lines.push('', 'Notes:', notes.value.trim() || '-');
+    return lines.join('\n');
+  }
+  var status = document.getElementById('report-status');
+  document.getElementById('copy-report').addEventListener('click', function(){
+    var text = report(), fb = document.getElementById('report-fallback');
+    var show = function(){ fb.hidden = false; fb.textContent = text; status.textContent = t('copyBox'); };
+    if (navigator.clipboard && navigator.clipboard.writeText){ navigator.clipboard.writeText(text).then(function(){ status.textContent = t('copied'); }, show); } else show();
+  });
+  document.getElementById('reset-report').addEventListener('click', function(){
+    boxes.forEach(function(b){ b.checked = false; }); notes.value = ''; save(); status.textContent = t('cleared'); if (typeof paintWinIssue === 'function') paintWinIssue();
+  });
+  // Module completion, kept in this browser
+  var MODS = ['setup','first','verify','game','windows'];
+  var DONE_T = { en:{ mark:'Mark module done', done:'Done · undo', hint:'Finished this module? Tick it off.' },
+                 vi:{ mark:'Đánh dấu xong module', done:'Đã xong · hoàn tác', hint:'Xong module này rồi? Đánh dấu lại nhé.' } };
+  var done = {};
+  try { done = JSON.parse(store.get('workshop-done') || '{}') || {}; } catch(e){ done = {}; }
+  document.querySelectorAll('.donebar').forEach(function(bar){
+    var mod = bar.getAttribute('data-done-for');
+    var btn = document.createElement('button'); btn.type = 'button'; btn.id = 'done-' + mod;
+    var hint = document.createElement('span'); hint.className = 'hint';
+    btn.addEventListener('click', function(){ done[mod] = !done[mod]; store.set('workshop-done', JSON.stringify(done)); paintDone(); });
+    bar.appendChild(btn); bar.appendChild(hint);
+  });
+  function paintDone(){
+    var d = DONE_T[lang] || DONE_T.en;
+    document.querySelectorAll('.donebar').forEach(function(bar){
+      var mod = bar.getAttribute('data-done-for'), on = !!done[mod];
+      var btn = bar.querySelector('button'), hint = bar.querySelector('.hint');
+      btn.textContent = on ? '✓ ' + d.done : d.mark;
+      btn.className = on ? 'btn done' : 'btn';
+      hint.textContent = on ? '' : d.hint;
+    });
+    document.querySelectorAll('a[data-mod]').forEach(function(a){
+      var on = !!done[a.dataset.mod];
+      a.classList.toggle('is-done', on);
+      var tick = a.querySelector('.tick'); if (tick) tick.hidden = !on;
+    });
+  }
+
+  // Issues on the team board, pre-filled through the link
+  var BOARD = 'https://github.com/SE370-Team1/framework/issues/new';
+  function issueUrl(title, body, label){
+    var q = 'title=' + encodeURIComponent(title) + '&body=' + encodeURIComponent(body);
+    if (label) q += '&labels=' + encodeURIComponent(label);
+    // Lands on the team's GitHub Project board as the issue is created.
+    q += '&projects=' + encodeURIComponent('SE370-Team1/2');
+    return BOARD + '?' + q;
+  }
+  function osName(){ return document.body.getAttribute('data-os') === 'win' ? 'Windows' : 'macOS'; }
+  var bModule = document.getElementById('b-module'), bWhat = document.getElementById('b-what'), bTried = document.getElementById('b-tried');
+  var bOpen = document.getElementById('b-open');
+  function paintBlocked(){
+    var what = bWhat.value.trim(), first = what.split('\n')[0].slice(0, 70);
+    var title = 'Workshop: ' + bModule.value + (first ? ' — ' + first : '');
+    var body = [
+      '**Module:** ' + bModule.value,
+      '**OS:** ' + osName(),
+      '',
+      '**What happened**',
+      what ? '```\n' + what + '\n```' : '_(describe it, paste the error)_',
+      '',
+      '**What I tried**',
+      bTried.value.trim() || '-',
+      '',
+      '**Versions** (`node -v`, Studio version, `git rev-parse --short HEAD` in robloxstudio-mcp):',
+      '',
+      '_From the Studio Agent Workshop page._'
+    ].join('\n');
+    bOpen.href = issueUrl(title, body, 'question');
+  }
+  [bModule, bWhat, bTried].forEach(function(el){ el.addEventListener('input', paintBlocked); el.addEventListener('change', paintBlocked); });
+  document.querySelectorAll('button[data-os]').forEach(function(b){ b.addEventListener('click', function(){ paintBlocked(); paintWinIssue(); }); });
+
+  var winIssue = document.getElementById('win-issue');
+  function paintWinIssue(){ winIssue.href = issueUrl('Windows check: ', report(), 'documentation'); }
+  document.querySelectorAll('#checklist input, #c-notes').forEach(function(el){ el.addEventListener('input', paintWinIssue); el.addEventListener('change', paintWinIssue); });
+  document.querySelectorAll('button[data-lang]').forEach(function(b){ b.addEventListener('click', function(){ paintDone(); paintWinIssue(); }); });
+
+  paintDone(); paintBlocked(); paintWinIssue();
+})();
+</script>
