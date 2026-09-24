@@ -245,6 +245,14 @@ export class ManagedInstanceRegistry {
         break;
       } catch (error) {
         const code = (error as NodeJS.ErrnoException).code;
+        // Transient on Windows: EPERM while a just-removed lock directory is still pending
+        // deletion, ENOENT when another process reclaimed the directory between our mkdir and
+        // owner.json. Both mean "not ours yet", like EEXIST.
+        if (code === 'EPERM' || code === 'ENOENT') {
+          if (Date.now() > deadline) throw error;
+          await delay(LOCK_RETRY_MS);
+          continue;
+        }
         if (code !== 'EEXIST') throw error;
 
         try {
