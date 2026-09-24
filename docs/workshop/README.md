@@ -5,7 +5,9 @@ Roblox Studio through this MCP, has watched it build, playtest and check somethi
 started a repository for their own game with the two files that make an agent useful there.
 
 The same workshop as one page, with an English/Vietnamese switch and pre-filled issue links, is
-[workshop.html](workshop.html), published as a Claude Artifact for the session.
+[workshop.html](workshop.html), published as a Claude Artifact for the session:
+<https://claude.ai/artifact/9tSFXzCPayuwpi7PHzhRUC>. Edit `workshop.html`, then republish it to
+that same URL.
 
 **No framework is required or taught.** Structure your game however your team likes; this
 workshop is about the loop between you, the agent and Studio, not about any codebase.
