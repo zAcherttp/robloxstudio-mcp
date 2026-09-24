@@ -507,7 +507,7 @@ _G.Debug = {
     <textarea id="c-notes" rows="4" maxlength="2000" style="width:100%;margin-top:6px;font:13.5px/1.5 var(--mono);padding:10px;border:1px solid var(--line);border-radius:6px;background:var(--surface);color:var(--ink)"></textarea>
     <div class="row">
       <button class="btn" type="button" id="copy-report"><span class="l-en">Copy report</span><span class="l-vi">Copy báo cáo</span></button>
-      <a class="btn ghost" id="win-issue" target="_blank" rel="noopener" href="https://github.com/SE370-Team1/framework/issues/new"><span class="l-en">Open as an issue</span><span class="l-vi">Mở thành issue</span></a>
+      <a class="btn ghost" id="win-issue" target="_blank" rel="noopener" href="https://github.com/SE370-Team1/docs/issues/new"><span class="l-en">Open as an issue</span><span class="l-vi">Mở thành issue</span></a>
       <button class="btn ghost" type="button" id="reset-report"><span class="l-en">Clear ticks</span><span class="l-vi">Xoá lựa chọn</span></button>
       <span class="status" id="report-status" role="status"></span>
     </div>
@@ -544,11 +544,11 @@ _G.Debug = {
       <textarea id="b-tried" rows="3" maxlength="1500"></textarea>
     </div>
     <div class="row" style="margin-top:0">
-      <a class="btn" id="b-open" target="_blank" rel="noopener" href="https://github.com/SE370-Team1/framework/issues/new"><span class="l-en">Open issue on GitHub</span><span class="l-vi">Mở issue trên GitHub</span></a>
+      <a class="btn" id="b-open" target="_blank" rel="noopener" href="https://github.com/SE370-Team1/docs/issues/new"><span class="l-en">Open issue on GitHub</span><span class="l-vi">Mở issue trên GitHub</span></a>
       <a class="btn ghost" target="_blank" rel="noopener" href="https://github.com/orgs/SE370-Team1/projects/2"><span class="l-en">See the team board</span><span class="l-vi">Xem bảng của team</span></a>
     </div>
-    <p class="meta l-en">The board is <code>SE370-Team1/framework</code>, a private repository: GitHub shows 404 until you're a member, so ask the facilitator. Your operating system comes from the switch at the top. Remove API keys and cookies before pasting anything.</p>
-    <p class="meta l-vi">Bảng issue là <code>SE370-Team1/framework</code>, một repository riêng tư: GitHub sẽ báo 404 nếu bạn chưa là thành viên, hãy nhờ người hướng dẫn thêm vào. Hệ điều hành lấy theo nút chuyển ở trên cùng. Xoá API key và cookie trước khi dán bất cứ thứ gì.</p>
+    <p class="meta l-en">Issues go to <code>SE370-Team1/docs</code>, a private repository: GitHub shows 404 until you're a member, so ask the facilitator. Your operating system comes from the switch at the top. Remove API keys and cookies before pasting anything.</p>
+    <p class="meta l-vi">Issue được tạo trong <code>SE370-Team1/docs</code>, một repository riêng tư: GitHub sẽ báo 404 nếu bạn chưa là thành viên, hãy nhờ người hướng dẫn thêm vào. Hệ điều hành lấy theo nút chuyển ở trên cùng. Xoá API key và cookie trước khi dán bất cứ thứ gì.</p>
   </div>
 </section>
 
@@ -664,7 +664,7 @@ _G.Debug = {
   }
 
   // Issues on the team board, pre-filled through the link
-  var BOARD = 'https://github.com/SE370-Team1/framework/issues/new';
+  var BOARD = 'https://github.com/SE370-Team1/docs/issues/new';
   function issueUrl(title, body, label){
     var q = 'title=' + encodeURIComponent(title) + '&body=' + encodeURIComponent(body);
     if (label) q += '&labels=' + encodeURIComponent(label);
@@ -692,13 +692,13 @@ _G.Debug = {
       '',
       '_From the Studio Agent Workshop page._'
     ].join('\n');
-    bOpen.href = issueUrl(title, body, 'question');
+    bOpen.href = issueUrl(title, body, 'blocked');
   }
   [bModule, bWhat, bTried].forEach(function(el){ el.addEventListener('input', paintBlocked); el.addEventListener('change', paintBlocked); });
   document.querySelectorAll('button[data-os]').forEach(function(b){ b.addEventListener('click', function(){ paintBlocked(); paintWinIssue(); }); });
 
   var winIssue = document.getElementById('win-issue');
-  function paintWinIssue(){ winIssue.href = issueUrl('Windows check: ', report(), 'documentation'); }
+  function paintWinIssue(){ winIssue.href = issueUrl('Windows check: ', report(), 'workshop'); }
   document.querySelectorAll('#checklist input, #c-notes').forEach(function(el){ el.addEventListener('input', paintWinIssue); el.addEventListener('change', paintWinIssue); });
   document.querySelectorAll('button[data-lang]').forEach(function(b){ b.addEventListener('click', function(){ paintDone(); paintWinIssue(); }); });
 
