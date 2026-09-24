@@ -4,9 +4,9 @@ This fork is developed on macOS. Upstream was built Windows-first and its Window
 unchanged here, and CI builds and runs the offline tests on Windows, but **nobody has run this
 fork against a live Studio on Windows yet**. Ten minutes from one Windows teammate settles it.
 
-Open a **Windows check** issue on the fork
-([new issue → Windows check](https://github.com/zAcherttp/robloxstudio-mcp/issues/new?template=windows-check.yml)),
-paste the list below with what worked ticked, and paste the error for anything that did not.
+Open a "Windows check" issue on your team's issue board, paste the list below with what worked
+ticked, and paste the error for anything that did not. (The workshop page's **Open as an issue**
+button does this for you.)
 
 ```
 Windows version:

@@ -17,7 +17,7 @@ workshop is about the loop between you, the agent and Studio, not about any code
 | 4 | [Your own game](04-your-game.md) | 40 min | A repo with `CLAUDE.md` and `LESSONS.md`, and a first feature built |
 | 5 | [Windows check](05-windows-check.md) | 10 min, Windows only | A short report that tells us the Windows path works |
 
-**Blocked at any point?** Open a [Workshop blocker issue](https://github.com/zAcherttp/robloxstudio-mcp/issues/new?template=workshop-blocker.yml): which module, what you saw, what you tried.
+**Blocked at any point?** Open an issue on your team's issue board: which module, what you saw, what you tried. The workshop page's **Blocked?** section fills one in for you.
 
 Take a break between 2 and 3.
 
@@ -39,8 +39,7 @@ Each person needs:
 - Have one place ready to share: a Baseplate with a few parts is enough. Nothing game-specific.
 - Keep the MCP's reference pages open: [agent-guide.md](../agent-guide.md) (what the agent
   should know about Studio) and [roblox-skills.md](../roblox-skills.md) (which skills to trust).
-- Anyone blocked opens a **Workshop blocker** issue on the fork
-  ([new issue](https://github.com/zAcherttp/robloxstudio-mcp/issues/new/choose)); Windows reports from
-  module 5 use the **Windows check** form. Issues must be enabled on the fork (Settings → General →
-  Features → Issues).
+- Pick one issue board for the team and make sure everyone can open issues on it. Blockers and the
+  Windows reports from module 5 go there, one issue per problem. The fork also carries **Workshop
+  blocker** and **Windows check** issue forms (`.github/ISSUE_TEMPLATE/`) to copy into that repo.
 - Things people will hit, and the fix, are in each module's **If it goes wrong** section.
