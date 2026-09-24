@@ -221,7 +221,7 @@ assert.throws(() => parseCompletedInstallerLog(completedLog, finalizeStart + 3_6
 
 // Resolved: macOS's temp directory sits behind a symlink (/var -> /private/var), which repair
 // finalization rightly refuses as a redirect.
-const directory = realpathSync(mkdtempSync(path.join(tmpdir(), 'studio-install-repair-')));
+const directory = realpathSync.native(mkdtempSync(path.join(tmpdir(), 'studio-install-repair-')));
 try {
   const logs = path.join(directory, 'logs');
   mkdirSync(logs);

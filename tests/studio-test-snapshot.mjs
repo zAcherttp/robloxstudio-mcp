@@ -10,9 +10,10 @@ import os from 'node:os';
 import path from 'node:path';
 import { prepareStudioTestSnapshot } from '../scripts/studio-test-snapshot.mjs';
 
-// Resolved: macOS's temp directory sits behind a symlink (/var -> /private/var), and the snapshot
+// Resolved natively: macOS's temp directory sits behind a symlink (/var -> /private/var), Windows'
+// can be an 8.3 short name (RUNNER~1), and the snapshot
 // reports resolved paths.
-const directory = realpathSync(mkdtempSync(path.join(os.tmpdir(), 'rsmcp-snapshot-tests-')));
+const directory = realpathSync.native(mkdtempSync(path.join(os.tmpdir(), 'rsmcp-snapshot-tests-')));
 const sourceDirectory = path.join(directory, 'working tree ü');
 const destinationParent = path.join(directory, 'exports');
 
