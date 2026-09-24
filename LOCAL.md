@@ -41,7 +41,12 @@ is a conflict waiting at the next merge. What this fork carries on top of upstre
   such paths cannot exist.
 - **CI** (`.github/workflows/ci.yml`): build, plugin build and `npm test` on Windows, macOS and
   Linux. Upstream has no CI; this is what makes "works on Windows" more than a reading of the code.
-  It never starts Studio.
+  It never starts Studio. Green on all three since `3d08ccc`, after four Windows fixes upstream
+  never saw: the package-contents test spawned `npm.cmd` without a shell (refused since
+  CVE-2024-27980); a PowerShell fixture compared a line that began with a byte-order mark; the
+  snapshot and repair tests compared an 8.3 short temp path (`RUNNER~1`) with its long form; and
+  the managed-instance registry lock failed outright on Windows' transient `EPERM`/`ENOENT`
+  instead of retrying.
 - **`.gitattributes`**: LF everywhere, so a Windows checkout builds and tests the same bytes.
 - **Docs for a team:** a fork quickstart at the top of `README.md`, `docs/agent-guide.md`
   (driving Studio as an agent, game-agnostic), `docs/roblox-skills.md`, and `docs/workshop/`.
