@@ -39,6 +39,8 @@ A new feature is not done until it has one, and a way to read its result back.
 
 ## Never
 
+- Push to `main`, merge a pull request, or approve one. Work on a branch, open a pull request with
+  `Closes #<issue>`, and let a person review and merge.
 - Publish the place, or change live DataStores, Open Cloud resources or monetization settings.
 - Commit secrets. <Where keys live instead.>
 - <Anything else this team has been burned by.>
