@@ -3001,7 +3001,8 @@ export class RobloxStudioTools {
     try {
       const answer = await fetch(`http://localhost:${servePort}/api/rojo`, { signal: AbortSignal.timeout(1500) });
       const text = Buffer.from(await answer.arrayBuffer()).toString('latin1');
-      const named = /projectName.{1,2}([A-Za-z0-9_ -]+)/.exec(text);
+      // JSON (":"), or MessagePack (a length byte of 0xa0 and up): either way, non-alphanumerics.
+      const named = /projectName[^A-Za-z0-9]{1,4}([A-Za-z0-9_ -]+)/.exec(text);
       server = { reachable: answer.ok, port: servePort, project: named ? named[1].trim() : undefined };
     } catch {
       server = { reachable: false, port: servePort };
@@ -3019,7 +3020,8 @@ export class RobloxStudioTools {
     if (rojo.notes.length > 0) result.notes = rojo.notes;
     if (!sync.in_sync) {
       result.hint = server.reachable
-        ? 'Studio is not running what is on disk: reconnect the Rojo plugin in Studio (its server is up), then check again.'
+        ? 'Studio is not running what is on disk: reconnect the Rojo plugin in Studio (its server is up), then check again. '
+          + 'If Rojo serves another checkout of this project (a worktree), pass that as project.'
         : `Studio is not running what is on disk, and no Rojo server answers on port ${servePort}: start rojo serve, connect the plugin, then check again.`;
     }
     return { content: [{ type: 'text', text: JSON.stringify(result) }] };
