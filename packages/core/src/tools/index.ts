@@ -48,6 +48,8 @@ import {
   parseHeapSnapshot,
   summarizeHeapSnapshot,
 } from '../heap-snapshot.js';
+import { compareSync, readRojoProject, studioSyncScript } from '../rojo-sync.js';
+import type { StudioReport } from '../rojo-sync.js';
 
 // capture_heap_snapshot: how long the engine gets to produce a report, and how much of it one
 // execute_luau reply carries.
@@ -2969,6 +2971,60 @@ export class RobloxStudioTools {
     return { content: [{ type: 'text', text: JSON.stringify(result) }] };
   }
 
+  // Whether the Studio edit session runs what is on disk: a Rojo project's scripts compared with
+  // Studio's by content (see rojo-sync.ts). A Rojo server that answers proves nothing about its
+  // Studio plugin, which can drop and leave every playtest running old code.
+  async checkRojo(request: Record<string, unknown> = {}, instance_id?: string) {
+    const { project, port } = request;
+    if (project !== undefined && typeof project !== 'string') throw new Error('project must be a string when provided');
+    if (port !== undefined && (typeof port !== 'number' || !Number.isInteger(port) || port < 1 || port > 65535)) {
+      throw new Error('port must be a whole number from 1 to 65535 when provided');
+    }
+    const projectFile = findRojoProject(typeof project === 'string' ? project : undefined);
+    const rojo = readRojoProject(projectFile);
+
+    const response = await this._callSingle(
+      '/api/execute-luau',
+      { code: studioSyncScript(rojo.scripts.map((script) => script.instance), rojo.roots) },
+      'edit',
+      instance_id,
+    );
+    const reply = response as { success?: boolean; returnValue?: unknown; error?: unknown; message?: unknown };
+    if (!reply || reply.success !== true || typeof reply.returnValue !== 'string') {
+      const why = reply?.error ?? reply?.message ?? JSON.stringify(response).slice(0, 300);
+      throw new Error(`check_rojo could not read Studio's scripts: ${String(why)}`);
+    }
+    const sync = compareSync(rojo, JSON.parse(reply.returnValue) as StudioReport);
+
+    const servePort = (port as number | undefined) ?? rojo.servePort;
+    let server: Record<string, unknown>;
+    try {
+      const answer = await fetch(`http://localhost:${servePort}/api/rojo`, { signal: AbortSignal.timeout(1500) });
+      const text = Buffer.from(await answer.arrayBuffer()).toString('latin1');
+      const named = /projectName.{1,2}([A-Za-z0-9_ -]+)/.exec(text);
+      server = { reachable: answer.ok, port: servePort, project: named ? named[1].trim() : undefined };
+    } catch {
+      server = { reachable: false, port: servePort };
+    }
+
+    const result: Record<string, unknown> = {
+      in_sync: sync.in_sync,
+      project: rojo.file,
+      rojo_server: server,
+      compared: sync.compared,
+      differ: sync.differ,
+      only_on_disk: sync.only_on_disk,
+      only_in_studio: sync.only_in_studio,
+    };
+    if (rojo.notes.length > 0) result.notes = rojo.notes;
+    if (!sync.in_sync) {
+      result.hint = server.reachable
+        ? 'Studio is not running what is on disk: reconnect the Rojo plugin in Studio (its server is up), then check again.'
+        : `Studio is not running what is on disk, and no Rojo server answers on port ${servePort}: start rojo serve, connect the plugin, then check again.`;
+    }
+    return { content: [{ type: 'text', text: JSON.stringify(result) }] };
+  }
+
   async captureMicroProfiler(target?: string, request: Record<string, unknown> = {}, instance_id?: string) {
     const targetRole = target ?? 'server';
     const data: Record<string, unknown> = { ...request };
@@ -5622,6 +5678,19 @@ export function filterLessons(text: string, domain: string): { count: number; te
     keeping = false;
   }
   return { count, text: kept.length > 0 ? kept.join('\n') : `No lesson mentions "${filter}".` };
+}
+
+// The Rojo project check_rojo reads: an explicit file (or a directory holding
+// default.project.json), else default.project.json in the directory the client launched the
+// server in, which for Claude Code is the project.
+export function findRojoProject(explicit?: string, cwd: string = process.cwd()): string {
+  const given = (explicit ?? '').trim();
+  const start = given ? path.resolve(cwd, given) : cwd;
+  const file = fs.existsSync(start) && fs.statSync(start).isDirectory() ? path.join(start, 'default.project.json') : start;
+  if (!fs.existsSync(file)) {
+    throw new Error(`check_rojo found no Rojo project at ${file}; pass project with the path to a *.project.json`);
+  }
+  return file;
 }
 
 // Where a project keeps its lessons: an explicit path, then ROBLOX_PROJECT_LESSONS, then

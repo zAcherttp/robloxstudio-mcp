@@ -1023,6 +1023,32 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
     }
   },
   {
+    name: 'check_rojo',
+    // Not 'read': it runs Luau in the edit session through execute_luau, which the read-only
+    // Inspector must never reach. It changes nothing.
+    category: 'write',
+    description: 'Use to check Studio runs what is on disk: Rojo project scripts compared by content.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        project: {
+          type: 'string',
+          description: 'Rojo project file or folder; defaults to default.project.json.'
+        },
+        port: {
+          type: 'number',
+          minimum: 1,
+          maximum: 65535,
+          description: 'rojo serve port; defaults to servePort or 34872.'
+        },
+        instance_id: {
+          type: 'string',
+          description: 'Studio process ID when ambiguous.'
+        }
+      }
+    }
+  },
+  {
     name: 'capture_heap_snapshot',
     // Not 'read': it runs Luau on the peer through execute_luau, which the read-only Inspector
     // must never reach.

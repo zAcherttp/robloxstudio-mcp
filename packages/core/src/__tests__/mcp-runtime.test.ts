@@ -293,10 +293,11 @@ describe('MCP v2 tool runtime', () => {
     const serialized = JSON.stringify(catalog);
     const inspectorCatalog = getReadOnlyTools().map(publicToolDefinition);
 
-    // capture_heap_snapshot (this fork) added one tool and about 850 characters.
-    expect(catalog).toHaveLength(50);
-    expect(serialized.length).toBeLessThanOrEqual(45_000);
-    expect(catalog.filter((tool) => tool.outputSchema)).toHaveLength(49);
+    // capture_heap_snapshot and check_rojo (this fork) added a tool each, about 850 and 450
+    // characters.
+    expect(catalog).toHaveLength(51);
+    expect(serialized.length).toBeLessThanOrEqual(45_500);
+    expect(catalog.filter((tool) => tool.outputSchema)).toHaveLength(50);
     expect(catalog.every((tool) => tool.description.length <= 120)).toBe(true);
     expect(inspectorCatalog).toHaveLength(25);
     expect(JSON.stringify(inspectorCatalog).length).toBeLessThanOrEqual(20_000);

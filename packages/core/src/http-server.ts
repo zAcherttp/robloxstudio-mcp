@@ -75,6 +75,7 @@ const TOOL_PROXY_ENDPOINTS: Record<string, readonly string[]> = {
   get_runtime_logs: ['/api/get-runtime-logs'],
   capture_script_profiler: ['/api/capture-script-profiler'],
   capture_heap_snapshot: ['/api/execute-luau'],
+  check_rojo: ['/api/execute-luau'],
   capture_micro_profiler: ['/api/capture-micro-profiler'],
   breakpoints: ['/api/breakpoints'],
   insert_asset: ['/api/insert-asset'],
@@ -239,6 +240,10 @@ export const TOOL_HANDLERS: Record<string, ToolHandler> = {
     include_native: body.include_native,
     include_plugin: body.include_plugin,
     output_path: body.output_path,
+  }, body.instance_id),
+  check_rojo: (tools, body) => tools.checkRojo({
+    project: body.project,
+    port: body.port,
   }, body.instance_id),
   capture_heap_snapshot: (tools, body) => tools.captureHeapSnapshot(body.target, {
     output_path: body.output_path,

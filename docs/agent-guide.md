@@ -25,6 +25,14 @@ your editor ──(Rojo, Script Sync, or edit in Studio)──► Studio
 How code reaches Studio is your team's choice: Rojo, Studio's own Script Sync, or editing scripts
 in place with `set_script_source` / `edit_script_lines`. The MCP works with all three.
 
+**With Rojo, check Studio has your code before you trust a test: `check_rojo`.** It compares the
+project's scripts (its `default.project.json`, read with Rojo's naming rules) with the edit
+session's by content and names what differs, what is only on disk and what is only in Studio. A
+Rojo server that answers proves nothing about its Studio plugin: the plugin can drop, and the
+server can crash when a folder is deleted, and every playtest after that runs old code while
+looking like a test of the new. Run it after editing files and before a playtest you will draw a
+conclusion from. Pass `port` if you serve on a port the project file does not name.
+
 **Edit mode and a playtest are different DataModels.** `execute_luau` reaches the edit one and
 cannot see a running game unless you pass `target: "server"` or `"client-1"`.
 `eval_server_runtime` and `eval_client_runtime` reach the play session, and are two separate

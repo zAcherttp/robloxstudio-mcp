@@ -20,6 +20,16 @@ is a conflict waiting at the next merge. What this fork carries on top of upstre
   read back in 200 KB chunks that end on UTF-8 boundaries. Category `write`, so the read-only
   Inspector cannot reach `execute_luau` through it; it raised the catalog budget test to 50 tools
   and 45,000 characters.
+- **`check_rojo`** (`packages/core/src/rojo-sync.ts`): whether the Studio edit session runs what
+  is on disk. It reads a Rojo project (`default.project.json` in the directory the client launched
+  the server in, or `project`), maps each script file to its instance by Rojo's naming rules, and
+  compares an exact 32-bit FNV-1a of each file with the same hash of each `Source`, computed in
+  Studio by one `execute_luau` (so no plugin change); it also lists scripts under the mapped roots
+  that no file accounts for, and whether a Rojo server answers. Written after a session in which
+  the Rojo plugin dropped (the server had crashed on a deleted folder) and two rounds of
+  two-player tests ran old code unnoticed. Category `write` (it reaches `execute_luau`, which the
+  Inspector must not), annotated non-destructive and idempotent; the catalog budget test went to
+  51 tools and 45,500 characters.
 - **A build stamp** (`scripts/stamp-build.mjs`): `npm run build` and `npm run build:plugin` each
   record the commit they were built from (`+` for uncommitted changes) and when. The plugin panel's
   credit line shows the plugin's stamp and the server's side by side, amber when they differ. The

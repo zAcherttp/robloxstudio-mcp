@@ -310,6 +310,7 @@ describe('Tool schema compatibility', () => {
       get_runtime_logs: 'getRuntimeLogs',
       capture_script_profiler: 'captureScriptProfiler',
       capture_heap_snapshot: 'captureHeapSnapshot',
+      check_rojo: 'checkRojo',
       capture_micro_profiler: 'captureMicroProfiler',
       breakpoints: 'breakpoints',
       insert_asset: 'insertAsset',

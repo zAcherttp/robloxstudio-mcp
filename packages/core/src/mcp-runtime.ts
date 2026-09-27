@@ -75,6 +75,7 @@ const SIDE_EFFECTING_READ_TOOLS = new Set([
 const NON_DESTRUCTIVE_SIDE_EFFECT_TOOLS = new Set([
   'capture_device_matrix',
   'capture_heap_snapshot',
+  'check_rojo',
   'generate_model',
   'import_rbxm',
   'insert_asset',
@@ -84,6 +85,7 @@ const NON_DESTRUCTIVE_SIDE_EFFECT_TOOLS = new Set([
 ]);
 const IDEMPOTENT_WRITE_TOOLS = new Set([
   'capture_device_matrix',
+  'check_rojo',
   'export_rbxm',
   'reset_simulation_state',
   'set_device_simulator',
