@@ -62,11 +62,13 @@ is a conflict waiting at the next merge. What this fork carries on top of upstre
   tool call per step cost about 0.2 s. The catalog budget test went to 52 tools and 46,500
   characters, and the schema test maps the new tool.
 
-- **Eval results keep every key** (`studio-plugin/.../LuauExec.ts`, `jsonSafe`). `JSONEncode`
-  dropped the named keys of a table with a list part and failed outright on a `Vector3` or an
-  Instance ("table: 0x..."); results are now made JSON-safe first: pure lists stay arrays, other
-  tables become objects with string keys, engine values their `tostring` (an Instance its full
-  name), cycles and depth past 20 marked.
+- **Eval results keep every key** (`studio-plugin/.../LuauExec.ts`: `__mcp_safe` in the wrapper,
+  `jsonSafe` in the plugin). A table with a list part lost its other keys twice over: crossing the
+  runtime evals' `BindableFunction` (which keeps only the list part), then in `JSONEncode`, which
+  also failed outright on a `Vector3` or an Instance ("table: 0x..."). The wrapper, in the VM that
+  ran the code, turns any table that is not a pure list into one with string keys before it
+  crosses (after the user's code, so line offsets are unchanged); the plugin then makes engine
+  values their `tostring` (an Instance its full name). Cycles and depth past 20 are marked.
 - **`check_rojo` checks a running playtest too.** A playtest holds copies of the scripts made
   when it started, and Rojo syncs only the edit session; with a play server in scope the same
   hashing runs there, and a `playtest` block reports what differs (runtime-made scripts ignored),

@@ -223,7 +223,32 @@ ${code}
 \t\tend
 \t\treturn table.concat(kept, "\\n")
 \tend
+\t-- In the VM that ran the code, before the value crosses a BindableFunction (the runtime evals'
+\t-- path), which keeps only the list part of a table that also has other keys: any table that is
+\t-- not a pure list 1..n becomes one with string keys (this fork). Engine values pass as they are;
+\t-- the plugin makes them JSON-safe. Cycles and depth past 20 are marked.
+\tlocal function __mcp_safe(v, depth, seen)
+\t\tif type(v) ~= "table" then return v end
+\t\tif seen[v] then return "<cycle>" end
+\t\tif depth >= 20 then return "<too deep>" end
+\t\tseen[v] = true
+\t\tlocal count = 0
+\t\tfor _ in pairs(v) do count += 1 end
+\t\tlocal list = true
+\t\tfor i = 1, count do
+\t\t\tif v[i] == nil then list = false break end
+\t\tend
+\t\tlocal out = {}
+\t\tif list then
+\t\t\tfor i = 1, count do out[i] = __mcp_safe(v[i], depth + 1, seen) end
+\t\telse
+\t\t\tfor k, x in pairs(v) do out[tostring(k)] = __mcp_safe(x, depth + 1, seen) end
+\t\tend
+\t\tseen[v] = nil
+\t\treturn out
+\tend
 \tlocal ok, errOrValue = xpcall(__mcp_run, __mcp_traceback)
+\tif ok then errOrValue = __mcp_safe(errOrValue, 0, {}) end
 \treturn { ok = ok, value = errOrValue, output = __mcp_output }
 end)())`;
 }
