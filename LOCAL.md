@@ -62,6 +62,22 @@ is a conflict waiting at the next merge. What this fork carries on top of upstre
   tool call per step cost about 0.2 s. The catalog budget test went to 52 tools and 46,500
   characters, and the schema test maps the new tool.
 
+- **Eval results keep every key** (`studio-plugin/.../LuauExec.ts`, `jsonSafe`). `JSONEncode`
+  dropped the named keys of a table with a list part and failed outright on a `Vector3` or an
+  Instance ("table: 0x..."); results are now made JSON-safe first: pure lists stay arrays, other
+  tables become objects with string keys, engine values their `tostring` (an Instance its full
+  name), cycles and depth past 20 marked.
+- **`check_rojo` checks a running playtest too.** A playtest holds copies of the scripts made
+  when it started, and Rojo syncs only the edit session; with a play server in scope the same
+  hashing runs there, and a `playtest` block reports what differs (runtime-made scripts ignored),
+  with a hint to restart the playtest.
+- **Eval preludes** (`readEvalPrelude`, `_runEvalPrelude`). A project's
+  `.robloxstudio/eval-prelude.server.luau` and `.client.luau` (from the launch directory) run as
+  an eval of their own once per playtest peer before its first eval, and again when the file
+  changes, so helpers they put in `_G` exist in every fresh playtest; a prelude failure comes back
+  as `prelude_error` beside the caller's result. Written after a session that rebuilt the same
+  command-bridge helper about fifteen times.
+
 - **`npm test` passes on macOS.** `tests/studio-test-snapshot.mjs` and
   `tests/studio-install-repair.mjs` resolve their temp directory (`/var` links to `/private/var`),
   and the snapshot test skips its case-collision case on a case-insensitive filesystem, where two

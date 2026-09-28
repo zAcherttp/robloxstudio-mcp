@@ -303,10 +303,53 @@ function isLoadstringUnavailable(err: unknown): boolean {
 // Returns a string suitable for `returnValue`. Tables get JSON-encoded so
 // the caller sees structured data instead of "table: 0xaddr". Anything that
 // JSONEncode chokes on (cycles, Roblox userdata) falls back to tostring.
+// A value made safe for JSONEncode (this fork). JSONEncode treats a table with a list part as an
+// array and silently drops its other keys ({ 1, 2, named = x } lost `named`), and fails outright
+// on a Vector3 or an Instance, which returned "table: 0x..." for the whole result. Here a pure list
+// (keys 1..n) stays an array; any other table becomes an object with string keys; engine values
+// become their tostring (an Instance its full name); NaN and infinities become text; cycles and
+// depth past 20 are marked rather than followed.
+const JSON_DEPTH = 20;
+
+function jsonSafe(value: unknown, depth: number, seen: Set<unknown>): unknown {
+	if (value === undefined) return undefined;
+	if (typeIs(value, "number")) {
+		return value !== value || value === math.huge || value === -math.huge ? tostring(value) : value;
+	}
+	if (typeIs(value, "string") || typeIs(value, "boolean")) return value;
+	if (typeIs(value, "Instance")) return value.GetFullName();
+	if (!typeIs(value, "table")) return tostring(value);
+	if (seen.has(value)) return "<cycle>";
+	if (depth >= JSON_DEPTH) return "<too deep>";
+	seen.add(value);
+	const t = value as Record<string | number, unknown>;
+	let count = 0;
+	for (const [] of pairs(t)) count += 1;
+	let isList = true;
+	for (let i = 1; i <= count; i++) {
+		if (t[i] === undefined) {
+			isList = false;
+			break;
+		}
+	}
+	let result: unknown;
+	if (isList) {
+		const list: defined[] = [];
+		for (let i = 1; i <= count; i++) list.push(jsonSafe(t[i], depth + 1, seen) as defined);
+		result = list;
+	} else {
+		const object: Record<string, unknown> = {};
+		for (const [k, v] of pairs(t)) object[tostring(k)] = jsonSafe(v, depth + 1, seen);
+		result = object;
+	}
+	seen.delete(value);
+	return result;
+}
+
 function formatReturnValue(value: unknown): string {
 	if (value === undefined) return "";
 	if (typeIs(value, "table")) {
-		const [ok, encoded] = pcall(() => HttpService.JSONEncode(value));
+		const [ok, encoded] = pcall(() => HttpService.JSONEncode(jsonSafe(value, 0, new Set())));
 		if (ok) return encoded as string;
 	}
 	return tostring(value);

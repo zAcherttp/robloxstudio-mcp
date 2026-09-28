@@ -2028,16 +2028,39 @@ export class RobloxStudioTools {
     };
   }
 
+  // The project's eval prelude for one peer (this fork): run once per playtest peer, and again when
+  // the file changes, as an eval of its own before the caller's, so helpers it puts in _G exist in
+  // every fresh playtest and line numbers in the caller's errors stay the caller's. Returns the
+  // prelude's error, if it failed; the caller's eval runs either way.
+  private _preludeRan = new Map<string, string>();
+
+  private async _runEvalPrelude(side: 'server' | 'client', target: string, instance_id?: string): Promise<unknown> {
+    const prelude = readEvalPrelude(side);
+    if (prelude === undefined) return undefined;
+    const refresh = this.bridge.refreshTopologyForRouting();
+    if (refresh) await refresh;
+    const resolved = this.bridge.resolveTarget({ instance_id, target });
+    if (!resolved.ok || resolved.mode !== 'single') return undefined;
+    if (this._preludeRan.get(resolved.targetPeerId) === prelude) return undefined;
+    const response = await this._callSingle('/api/eval-runtime', { code: prelude }, target, instance_id) as { ok?: boolean; error?: unknown };
+    if (response && response.ok === true) {
+      this._preludeRan.set(resolved.targetPeerId, prelude);
+      return undefined;
+    }
+    return response?.error ?? 'the prelude did not run';
+  }
+
   async evalServerRuntime(code: string, instance_id?: string) {
     if (!code) {
       throw new Error('Code is required for eval_server_runtime');
     }
+    const preludeError = await this._runEvalPrelude('server', 'server', instance_id);
     const response = await this._callSingle('/api/eval-runtime', { code }, 'server', instance_id);
     return {
       content: [
         {
           type: 'text',
-          text: JSON.stringify(response)
+          text: JSON.stringify(preludeError === undefined ? response : { ...(response as object), prelude_error: preludeError })
         }
       ]
     };
@@ -2051,12 +2074,13 @@ export class RobloxStudioTools {
     if (!clientTarget.startsWith('client-')) {
       throw new Error(`eval_client_runtime requires target=client-N (got: ${clientTarget})`);
     }
+    const preludeError = await this._runEvalPrelude('client', clientTarget, instance_id);
     const response = await this._callSingle('/api/eval-runtime', { code }, clientTarget, instance_id);
     return {
       content: [
         {
           type: 'text',
-          text: JSON.stringify(response)
+          text: JSON.stringify(preludeError === undefined ? response : { ...(response as object), prelude_error: preludeError })
         }
       ]
     };
@@ -2996,6 +3020,34 @@ export class RobloxStudioTools {
     }
     const sync = compareSync(rojo, JSON.parse(reply.returnValue) as StudioReport);
 
+    // A running playtest holds its own copies of the scripts, made when it started; Rojo syncs the
+    // edit session only, so a playtest started before a change runs the old code (this fork: a
+    // round of tests once ran stale code unnoticed). With a play server in scope, hash its copies
+    // too. Scripts made at runtime (the eval bridges) are not the project's, so only scripts that
+    // differ or are missing count.
+    let playtest: Record<string, unknown> | undefined;
+    const refresh = this.bridge.refreshTopologyForRouting();
+    if (refresh) await refresh;
+    const scope = this.bridge.resolveTarget({ instance_id, target: 'server' });
+    if (scope.ok && scope.mode === 'single') {
+      try {
+        const played = await this._callSingle(
+          '/api/execute-luau',
+          { code: studioSyncScript(rojo.scripts.map((script) => script.instance), rojo.roots) },
+          'server',
+          instance_id,
+        ) as { success?: boolean; returnValue?: unknown; error?: unknown };
+        if (played && played.success === true && typeof played.returnValue === 'string') {
+          const inPlay = compareSync(rojo, { ...(JSON.parse(played.returnValue) as StudioReport), extra: [] });
+          playtest = { running: true, in_sync: inPlay.in_sync, differ: inPlay.differ, only_on_disk: inPlay.only_on_disk };
+        } else {
+          playtest = { running: true, error: String(played?.error ?? 'could not read the play server') };
+        }
+      } catch (error) {
+        playtest = { running: true, error: error instanceof Error ? error.message : String(error) };
+      }
+    }
+
     const servePort = (port as number | undefined) ?? rojo.servePort;
     let server: Record<string, unknown>;
     try {
@@ -3017,12 +3069,16 @@ export class RobloxStudioTools {
       only_on_disk: sync.only_on_disk,
       only_in_studio: sync.only_in_studio,
     };
+    if (playtest) result.playtest = playtest;
     if (rojo.notes.length > 0) result.notes = rojo.notes;
     if (!sync.in_sync) {
       result.hint = server.reachable
         ? 'Studio is not running what is on disk: reconnect the Rojo plugin in Studio (its server is up), then check again. '
           + 'If Rojo serves another checkout of this project (a worktree), pass that as project.'
         : `Studio is not running what is on disk, and no Rojo server answers on port ${servePort}: start rojo serve, connect the plugin, then check again.`;
+    } else if (playtest && playtest.in_sync === false) {
+      result.hint = 'The edit session matches disk, but the running playtest started before the change and runs the old '
+        + 'scripts: stop the playtest and start it again.';
     }
     return { content: [{ type: 'text', text: JSON.stringify(result) }] };
   }
@@ -5716,6 +5772,22 @@ export function filterLessons(text: string, domain: string): { count: number; te
 // The Rojo project check_rojo reads: an explicit file (or a directory holding
 // default.project.json), else default.project.json in the directory the client launched the
 // server in, which for Claude Code is the project.
+// A project's eval prelude for one side (this fork): `.robloxstudio/eval-prelude.server.luau` or
+// `.client.luau` in the directory the MCP client launched the server from, which for Claude Code is
+// the project. Read at call time; a missing, non-file or oversized (over 64 KB) one is no prelude.
+const EVAL_PRELUDE_BYTES = 64 * 1024;
+
+export function readEvalPrelude(side: 'server' | 'client', cwd: string = process.cwd()): string | undefined {
+  const file = path.join(cwd, '.robloxstudio', `eval-prelude.${side}.luau`);
+  try {
+    const stat = fs.statSync(file);
+    if (!stat.isFile() || stat.size > EVAL_PRELUDE_BYTES) return undefined;
+    return fs.readFileSync(file, 'utf8');
+  } catch {
+    return undefined;
+  }
+}
+
 export function findRojoProject(explicit?: string, cwd: string = process.cwd()): string {
   const given = (explicit ?? '').trim();
   const start = given ? path.resolve(cwd, given) : cwd;
