@@ -11,4 +11,6 @@ WORKSHOP  The workshop artifact is owned by Phát's school Claude account, not t
           → republish workshop.html to the existing URL from the school account, never as a new artifact
 WINDOWS   CI is green on Windows, but nobody has driven a live Studio on Windows with this fork
           → don't claim Windows works end to end until a teammate has run it
+PLUGIN    A plugin change loads only when the Studio app itself is quit and reopened (StudioMCP restarting is not Studio)
+          → after build:plugin, check the RobloxStudio process start time is after the install before testing
 ```
