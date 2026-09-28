@@ -89,7 +89,8 @@ is a conflict waiting at the next merge. What this fork carries on top of upstre
   last tool call; the file goes when it exits. `npm run servers` lists them with GONE and STALE
   (built from another commit than the build on disk) and how long each has been idle, so it is
   clear which to stop; `--prune` clears files of servers killed outright. Touches `server.ts` in
-  three lines (start, bridge mode, each tool call).
+  three lines (start, bridge mode, each tool call). Tests write theirs under Jest's temporary root (`jest.setup.cjs`), never
+  the real list.
 
 - **`npm test` passes on macOS.** `tests/studio-test-snapshot.mjs` and
   `tests/studio-install-repair.mjs` resolve their temp directory (`/var` links to `/private/var`),
