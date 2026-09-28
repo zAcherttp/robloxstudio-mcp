@@ -95,14 +95,22 @@ is a conflict waiting at the next merge. What this fork carries on top of upstre
   `tests/studio-install-repair.mjs` resolve their temp directory (`/var` links to `/private/var`),
   and the snapshot test skips its case-collision case on a case-insensitive filesystem, where two
   such paths cannot exist.
-- **CI** (`.github/workflows/ci.yml`): build, plugin build and `npm test` on Windows, macOS and
-  Linux. Upstream has no CI; this is what makes "works on Windows" more than a reading of the code.
+- **CI** (`.github/workflows/ci.yml`): lint, typecheck, build, plugin build and `npm test` on
+  Windows, macOS and Linux. Upstream added its own CI (Linux and Windows) in #99; the merge keeps
+  its lint and typecheck steps and this fork's macOS leg, `main`-only pushes and manual runs. This
+  is what makes "works on Windows" more than a reading of the code.
   It never starts Studio. Green on all three since `3d08ccc`, after four Windows fixes upstream
   never saw: the package-contents test spawned `npm.cmd` without a shell (refused since
   CVE-2024-27980); a PowerShell fixture compared a line that began with a byte-order mark; the
   snapshot and repair tests compared an 8.3 short temp path (`RUNNER~1`) with its long form; and
   the managed-instance registry lock failed outright on Windows' transient `EPERM`/`ENOENT`
   instead of retrying.
+- **No download of upstream's plugin** (`packages/core/src/plugin-installer.ts`): when no plugin is
+  built in the checkout, `installPlugin` throws with the build command instead of fetching
+  upstream's released `.rbxmx`, which lacks this fork's tools and fails the build-stamp match.
+  `RSMCP_ALLOW_UPSTREAM_PLUGIN=1` opts back in; `installer-release.test.ts` sets it for upstream's
+  download tests and checks the refusal. Moved here from `install-plugin.ts` when upstream shared
+  the installer between editions (#100).
 - **`.gitattributes`**: LF everywhere, so a Windows checkout builds and tests the same bytes.
 - **`LESSONS.md`**: this fork's own lessons, one line each, append only. Not from upstream.
 - **Docs for a team:** a fork quickstart at the top of `README.md`, `docs/agent-guide.md`
@@ -125,11 +133,13 @@ rotate a perfectly good key. Sourcing the value at launch avoids the whole class
 ## After changing anything here
 
 ```bash
-npm run build
+npm run build && npm run build:plugin
 ```
 
-Then restart the Claude Code session: an MCP server reads its environment and loads its code once,
-at launch.
+An MCP server reads its environment and loads its code once, at launch. Kill only this session's
+server (the `dist/index.js` process whose parent is the session's own process) and Claude Code
+starts a fresh one on the next tool call; `npm run servers` shows which is whose. Studio usually
+reloads the changed plugin file by itself.
 
 ## Adopting upstream updates
 
@@ -152,10 +162,14 @@ git diff HEAD..upstream/main -- package.json packages/*/package.json
 If it looks sound:
 
 ```bash
-git merge upstream/main && npm install && npm run build && npm test
+git merge upstream/main && npm install && npm run build && npm run build:plugin && npm test
 ```
 
-Then restart the session and confirm the Studio tools still respond before trusting it.
+Then reload the server as above and confirm the Studio tools still respond before trusting it.
+
+Adopted so far: v3.1.5 at the fork, then upstream through #101 on 2026-09-28 (property writes,
+auth-token races, the shared plugin installer, false repair waits). Upstream's final #98 matched
+the capture code merged earlier, less this fork's screencapture fallback, which stays.
 
 ## Why this matters
 

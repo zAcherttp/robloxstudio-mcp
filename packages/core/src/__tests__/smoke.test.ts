@@ -1,6 +1,6 @@
 import { BridgeService } from '../bridge-service.js';
 import { createHttpServer } from '../http-server.js';
-import { RobloxStudioTools } from '../tools/index.js';
+import { RobloxStudioTools } from './test-tools.js';
 import { buildStudioLaunchArgs, buildWindowsStudioStartScript, cleanupManagedBaseplateFiles, isWsl, quoteWindowsCommandLineArg, StudioInstanceManager, sweepStaleBaseplateFiles } from '../studio-instance-manager.js';
 import { detectStudioPlatform } from '../studio-platform.js';
 import { ManagedInstanceRegistry } from '../managed-instance-registry.js';
@@ -1524,6 +1524,8 @@ describe('Smoke', () => {
     };
 
     try {
+      // Measure this list call, not the independent five-second coordinator.
+      jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate'] });
       const manager = new StudioInstanceManager({ registryDir, processAdapter });
       for (let index = 0; index < 10; index += 1) {
         await manager.launch({ source: 'local_file', localPlaceFile: `/tmp/snapshot-${index}.rbxl` });
@@ -1533,6 +1535,8 @@ describe('Smoke', () => {
       expect(await manager.list()).toHaveLength(10);
       expect(snapshotCalls).toBe(1);
     } finally {
+      jest.clearAllTimers();
+      jest.useRealTimers();
       fs.rmSync(registryDir, { recursive: true, force: true });
     }
   });

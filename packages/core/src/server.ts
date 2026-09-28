@@ -127,6 +127,7 @@ export class RobloxStudioMCPServer {
           // Stop the proxy bridge's background refresh before dropping the reference
           // so its setInterval doesn't keep the object alive past the swap.
           const oldBridge = this.bridge;
+          const oldTools = this.tools;
           this.bridge = candidateBridge;
           this.tools = candidateTools;
           if (oldBridge instanceof ProxyBridgeService) {
@@ -140,6 +141,7 @@ export class RobloxStudioMCPServer {
           primaryApp.setMCPServerActive(true);
           console.error(`Promoted from proxy to primary on port ${boundPort}`);
           if (promotionInterval) clearInterval(promotionInterval);
+          await oldTools.dispose();
         } catch {
           await candidateApp.cleanup().catch(() => {});
           // basePort still taken — discard the candidate, leave proxy bridge live.
@@ -218,6 +220,7 @@ export class RobloxStudioMCPServer {
       await stdioHandle.close().catch(() => {});
       await primaryApp?.cleanup().catch(() => {});
       if (httpHandle) httpHandle.close();
+      await this.tools.dispose();
       process.exit(0);
     };
 
