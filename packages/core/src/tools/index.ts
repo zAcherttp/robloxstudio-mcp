@@ -4917,7 +4917,15 @@ export class RobloxStudioTools {
     };
   }
 
-  async simulateMouseInput(action: string, x: number, y: number, button?: string, scrollDirection?: string, target?: string, instance_id?: string) {
+  async simulateMouseInput(
+    action: string,
+    x: number | undefined,
+    y: number | undefined,
+    button?: string,
+    extra?: { dx?: number; dy?: number; amount?: number },
+    target?: string,
+    instance_id?: string,
+  ) {
     if (!action) {
       throw new Error('action is required for simulate_mouse_input');
     }
@@ -4927,8 +4935,31 @@ export class RobloxStudioTools {
     if (refresh) await refresh;
     const { instanceId, clientRole } = this._resolveRuntime(instance_id);
     const response = await this._callSingle('/api/simulate-mouse-input', {
-      action, x, y, button
+      action, x, y, button, dx: extra?.dx, dy: extra?.dy, amount: extra?.amount
     }, target || clientRole || 'edit', instanceId);
+    return {
+      content: [{
+        type: 'text',
+        text: JSON.stringify(response)
+      }]
+    };
+  }
+
+  // Timed input steps, run in order inside the client in one request (this fork): each tool call
+  // cost about 0.2 s, too coarse for taps a tenth of a second apart. The waits bound the request.
+  async simulateInputSequence(steps: unknown, target?: string, instance_id?: string) {
+    if (!Array.isArray(steps) || steps.length === 0) {
+      throw new Error('steps (a non-empty array) is required for simulate_input_sequence');
+    }
+    const waited = steps.reduce((sum: number, step: unknown) => {
+      const s = step as { type?: unknown; seconds?: unknown };
+      return s.type === 'wait' && typeof s.seconds === 'number' ? sum + s.seconds : sum;
+    }, 0);
+    const refresh = this.bridge.refreshTopologyForRouting();
+    if (refresh) await refresh;
+    const { instanceId, clientRole } = this._resolveRuntime(instance_id);
+    const response = await this._callSingle('/api/simulate-input-sequence', { steps },
+      target || clientRole || 'edit', instanceId, Math.ceil((waited + 15) * 1000));
     return {
       content: [{
         type: 'text',

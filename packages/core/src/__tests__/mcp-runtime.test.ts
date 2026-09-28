@@ -97,9 +97,8 @@ describe('MCP v2 tool runtime', () => {
         const result = normalizeToolResult(raw, era);
         expect(result.isError).toBe(true);
         expect(result.structuredContent).toEqual(payload);
-        expect(result.content).toEqual(era === 'modern'
-          ? []
-          : [{ type: 'text', text: JSON.stringify(payload) }]);
+        // Kept as text in both eras: a client may show an error by its text alone (this fork).
+        expect(result.content).toEqual([{ type: 'text', text: JSON.stringify(payload) }]);
       }
     });
 
@@ -294,10 +293,11 @@ describe('MCP v2 tool runtime', () => {
     const inspectorCatalog = getReadOnlyTools().map(publicToolDefinition);
 
     // capture_heap_snapshot and check_rojo (this fork) added a tool each, about 850 and 450
-    // characters.
-    expect(catalog).toHaveLength(51);
-    expect(serialized.length).toBeLessThanOrEqual(45_500);
-    expect(catalog.filter((tool) => tool.outputSchema)).toHaveLength(50);
+    // characters; simulate_input_sequence about 660, and simulate_mouse_input's move, delta and
+    // pointer actions about 300.
+    expect(catalog).toHaveLength(52);
+    expect(serialized.length).toBeLessThanOrEqual(46_500);
+    expect(catalog.filter((tool) => tool.outputSchema)).toHaveLength(51);
     expect(catalog.every((tool) => tool.description.length <= 120)).toBe(true);
     expect(inspectorCatalog).toHaveLength(25);
     expect(JSON.stringify(inspectorCatalog).length).toBeLessThanOrEqual(20_000);

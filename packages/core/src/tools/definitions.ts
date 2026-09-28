@@ -1577,22 +1577,34 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
   {
     name: 'simulate_mouse_input',
     category: 'write',
-    description: 'Use to click the live playtest viewport at known pixel coordinates.',
+    description: 'Use to click, move, drag or scroll the live playtest mouse, or move it by a delta while locked.',
     inputSchema: {
       type: 'object',
       properties: {
         action: {
           type: 'string',
-          enum: ['click', 'mouseDown', 'mouseUp'],
-          description: 'Mouse action; click performs down, then up.'
+          enum: ['click', 'mouseDown', 'mouseUp', 'move', 'delta', 'scroll', 'pan', 'pinch'],
+          description: 'click is down then up; move goes to x,y; delta moves by dx,dy (cursor locked only); scroll, pan, pinch are pointer actions.'
         },
         x: {
           type: 'number',
-          description: 'Viewport pixel X coordinate.'
+          description: 'Viewport pixel X; needed by all but delta.'
         },
         y: {
           type: 'number',
-          description: 'Viewport pixel Y coordinate.'
+          description: 'Viewport pixel Y; needed by all but delta.'
+        },
+        dx: {
+          type: 'number',
+          description: 'Pixels across, for delta and pan.'
+        },
+        dy: {
+          type: 'number',
+          description: 'Pixels down, for delta and pan.'
+        },
+        amount: {
+          type: 'number',
+          description: 'Wheel steps for scroll (positive forward), or zoom for pinch (positive in); defaults to 1.'
         },
         button: {
           type: 'string',
@@ -1608,7 +1620,31 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
           description: 'Studio process ID when ambiguous.'
         }
       },
-      required: ['action', 'x', 'y']
+      required: ['action']
+    }
+  },
+  {
+    name: 'simulate_input_sequence',
+    category: 'write',
+    description: 'Use to run timed key, mouse and wait steps in order inside the live playtest client, in one call.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        steps: {
+          type: 'array',
+          description: 'Steps in order: {type:"key",keyCode,down}, {type:"mouse",action,...as simulate_mouse_input}, {type:"text",text}, {type:"wait",seconds}. Waits total at most 30 s.',
+          items: { type: 'object' }
+        },
+        target: {
+          type: 'string',
+          description: 'Peer; prefers a running client, then edit.'
+        },
+        instance_id: {
+          type: 'string',
+          description: 'Studio process ID when ambiguous.'
+        }
+      },
+      required: ['steps']
     }
   },
   {

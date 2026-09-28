@@ -85,6 +85,7 @@ const routeMap: Record<string, Handler> = {
 	"/api/capture-markers": CaptureHandlers.captureMarkers,
 	"/api/simulate-mouse-input": InputHandlers.simulateMouseInput,
 	"/api/simulate-keyboard-input": InputHandlers.simulateKeyboardInput,
+	"/api/simulate-input-sequence": InputHandlers.simulateInputSequence,
 
 	"/api/find-and-replace-in-scripts": ScriptHandlers.findAndReplaceInScripts,
 

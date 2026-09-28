@@ -319,6 +319,7 @@ describe('Tool schema compatibility', () => {
       capture_screenshot: 'captureScreenshot',
       simulate_mouse_input: 'simulateMouseInput',
       simulate_keyboard_input: 'simulateKeyboardInput',
+      simulate_input_sequence: 'simulateInputSequence',
       get_memory_breakdown: 'getMemoryBreakdown',
       get_scene_analysis: 'getSceneAnalysis',
       export_rbxm: 'exportRbxm',

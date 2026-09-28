@@ -175,7 +175,10 @@ export function normalizeToolResult(raw: unknown, era: ProtocolEra): CallToolRes
     || structured.success === false
     || (typeof structured.error === 'string' && structured.error.length > 0);
 
-  const content = era === 'modern'
+  // A failure keeps its JSON text for modern clients too (this fork): Claude Code shows an error
+  // result by its text alone, and with the text moved into structuredContent every tool failure,
+  // a Luau error's message included, reached the agent as "Unknown error".
+  const content = era === 'modern' && !isError
     ? originalContent.filter((_, index) => index !== jsonTextIndex)
     : [
         { type: 'text' as const, text: JSON.stringify(structured) },

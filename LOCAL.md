@@ -45,6 +45,23 @@ is a conflict waiting at the next merge. What this fork carries on top of upstre
   refusals are never overridden. It began as this fork's own macOS capture, before upstream had
   one; merged with upstream's in September 2026.
 
+- **Tool failures keep their message** (`packages/core/src/mcp-runtime.ts`, `normalizeToolResult`).
+  For modern clients upstream moves a result's JSON into `structuredContent` and drops the text;
+  on a failure Claude Code shows the result by its text alone, so every failed tool call (a Luau
+  error in `eval_*_runtime` included, whose message the plugin did send) arrived as
+  "Unknown error". A failure now keeps its JSON text in both eras; successes are unchanged. The
+  failure-projection test expects the text.
+- **Mouse movement and timed input sequences** (`studio-plugin/.../InputHandlers.ts`,
+  `simulate_mouse_input`, new `simulate_input_sequence`). `VirtualInput` gained
+  `SendMousePosition`, `SendMouseDelta` and `SendPointerAction` after upstream's handler said
+  there were none (verified live 2026-09-28: ten deltas of -20 px with the cursor locked turned a
+  game's aim exactly as 200 real pixels do; Roblox's own Studio MCP moves the mouse with zero
+  delta). `simulate_mouse_input` takes `move`, `delta` (cursor locked), `scroll`, `pan` and
+  `pinch`; `x`/`y` are no longer required for `delta`. `simulate_input_sequence` runs key, mouse,
+  text and wait steps in order inside the client in one request (waits at most 30 s), because a
+  tool call per step cost about 0.2 s. The catalog budget test went to 52 tools and 46,500
+  characters, and the schema test maps the new tool.
+
 - **`npm test` passes on macOS.** `tests/studio-test-snapshot.mjs` and
   `tests/studio-install-repair.mjs` resolve their temp directory (`/var` links to `/private/var`),
   and the snapshot test skips its case-collision case on a case-insensitive filesystem, where two

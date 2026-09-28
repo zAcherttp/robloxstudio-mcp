@@ -95,6 +95,7 @@ const CLIENT_BROKER_ALLOWED_ENDPOINTS = new Set<string>([
 	// pipeline, so it must execute in the client peer's VM.
 	"/api/simulate-mouse-input",
 	"/api/simulate-keyboard-input",
+	"/api/simulate-input-sequence",
 	// Viewport framing must target the same live client captured by screenshots.
 	"/api/focus-viewport",
 ]);
@@ -282,6 +283,9 @@ function setupClientBroker(attempt = 0) {
 		}
 		if (payload && payload.endpoint === "/api/simulate-keyboard-input") {
 			return InputHandlers.simulateKeyboardInput(payload.data ?? {});
+		}
+		if (payload && payload.endpoint === "/api/simulate-input-sequence") {
+			return InputHandlers.simulateInputSequence(payload.data ?? {});
 		}
 		if (payload && payload.endpoint === "/api/focus-viewport") {
 			return MetadataHandlers.focusViewport(payload.data ?? {});
