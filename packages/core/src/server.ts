@@ -9,6 +9,7 @@ import { ProxyBridgeService } from './proxy-bridge-service.js';
 import type { ToolDefinition } from './tools/definitions.js';
 import { createToolServer } from './mcp-runtime.js';
 import { BoundedStdioTransport } from './stdio-transport.js';
+import { startServerRegistry } from './server-registry.js';
 
 export interface ServerConfig {
   name: string;
@@ -64,6 +65,8 @@ export class RobloxStudioMCPServer {
     }
 
     let bridgeMode: 'primary' | 'proxy' = 'primary';
+    // Fork: whose this server is and whether it is used (server-registry.ts, npm run servers).
+    const registry = startServerRegistry(this.config.build);
     let httpHandle: http.Server | undefined;
     let primaryApp: RobloxStudioHttpApp | undefined;
     let boundPort = 0;
@@ -133,6 +136,7 @@ export class RobloxStudioMCPServer {
           boundPort = result.port;
           primaryApp = candidateApp;
           bridgeMode = 'primary';
+          registry.update({ bridge: `primary on port ${boundPort}` });
           primaryApp.setMCPServerActive(true);
           console.error(`Promoted from proxy to primary on port ${boundPort}`);
           if (promotionInterval) clearInterval(promotionInterval);
@@ -153,6 +157,7 @@ export class RobloxStudioMCPServer {
         allowedTools: this.allowedToolNames,
         era: context.era,
         invoke: async (tools, name, args, invocation) => {
+          registry.touch(name);
           const handler = TOOL_HANDLERS[name];
           if (!handler) throw new Error(`Unknown tool: ${name}`);
           return handler(tools, args, invocation);
@@ -169,6 +174,7 @@ export class RobloxStudioMCPServer {
       primaryApp.setMCPServerActive(true);
     }
 
+    registry.update({ bridge: bridgeMode === 'primary' ? `primary on port ${boundPort}` : `proxy to port ${basePort}` });
     console.error(bridgeMode === 'primary'
       ? 'MCP server marked as active (primary mode)'
       : 'MCP server active in proxy mode - forwarding requests to primary');

@@ -80,6 +80,17 @@ is a conflict waiting at the next merge. What this fork carries on top of upstre
   as `prelude_error` beside the caller's result. Written after a session that rebuilt the same
   command-bridge helper about fifteen times.
 
+- **A registry of running servers** (`packages/core/src/server-registry.ts`, `scripts/servers.mjs`,
+  `npm run servers`). Every MCP client session starts its own server (Claude Code: one per
+  session, in every project when configured at user level), and each keeps the code it started
+  with. Each server writes `~/.robloxstudio-mcp/servers/<pid>.json` (`ROBLOX_MCP_REGISTRY_DIR` to
+  move it): its parent, the directory and Claude Code session (`CLAUDE_CODE_HOST_SESSION_ID`) it
+  was started for, its build, whether it owns Studio's bridge port or relays through it, and its
+  last tool call; the file goes when it exits. `npm run servers` lists them with GONE and STALE
+  (built from another commit than the build on disk) and how long each has been idle, so it is
+  clear which to stop; `--prune` clears files of servers killed outright. Touches `server.ts` in
+  three lines (start, bridge mode, each tool call).
+
 - **`npm test` passes on macOS.** `tests/studio-test-snapshot.mjs` and
   `tests/studio-install-repair.mjs` resolve their temp directory (`/var` links to `/private/var`),
   and the snapshot test skips its case-collision case on a case-insensitive filesystem, where two

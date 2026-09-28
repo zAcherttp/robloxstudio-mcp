@@ -20,6 +20,7 @@
     "clean": "npm exec --workspaces -- npx rimraf dist",
     "dev": "npm run build -w packages/core && tsx packages/robloxstudio-mcp/src/index.ts",
     "dev:inspector": "npm run build -w packages/core && tsx packages/robloxstudio-mcp-inspector/src/index.ts",
+    "servers": "node scripts/servers.mjs",
     "start": "node packages/robloxstudio-mcp/dist/index.js",
     "start:inspector": "node packages/robloxstudio-mcp-inspector/dist/index.js",
     "lint": "eslint packages/*/src/**/*.ts",
