@@ -4383,8 +4383,61 @@ describe('Smoke', () => {
     if (firstContent.type !== 'text' || firstContent.text === undefined) throw new Error('Expected screenshot metadata text first');
     const meta = JSON.parse(firstContent.text);
     expect(meta).toMatchObject({ width: 3, height: 1, format: 'jpeg' });
-    expect(meta.message).toContain('downscaled from the 4x2 viewport');
-    expect(meta.message).toContain('multiply x read off this image by 1.3333 and y by 2.0000');
+    expect(meta).toMatchObject({ viewportWidth: 4, viewportHeight: 2 });
+    expect(meta.message).toContain('of the 4x2 viewport');
+    expect(meta.message).toContain('multiplies x by 1.3333 and y by 2.0000');
+  });
+
+  // A Retina Mac: CaptureService returns the framebuffer at twice Camera.ViewportSize, and
+  // VirtualInput takes ViewportSize pixels, so a click read off the image must be halved.
+  test('mouse input takes x/y read off the last screenshot and maps them to viewport pixels', async () => {
+    const bridge = new BridgeService();
+    const tools = new RobloxStudioTools(bridge);
+    bridge.registerPeer(READY);
+
+    const capturePromise = tools.captureScreenshot('instance:test', 'jpeg', 80);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const studioPending = claimQueuedRequest(bridge, 'session-1');
+    bridge.resolveRequest(studioPending!.requestId, { unavailable: 'no flag' });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const legacyPending = claimQueuedRequest(bridge, 'session-1');
+    expect(legacyPending?.request).toMatchObject({ endpoint: '/api/capture-screenshot' });
+    bridge.resolveRequest(legacyPending!.requestId, {
+      width: 4,
+      height: 2,
+      nativeWidth: 4,
+      nativeHeight: 2,
+      viewportWidth: 2,
+      viewportHeight: 1,
+      data: Buffer.from(Array.from({ length: 8 }, (_, i) => [i * 30, 0, 0, 255]).flat()).toString('base64'),
+    });
+    const capture = await capturePromise;
+    const firstContent = capture.content[0];
+    if (firstContent.type !== 'text' || firstContent.text === undefined) throw new Error('Expected screenshot metadata text first');
+    const meta = JSON.parse(firstContent.text);
+    expect(meta).toMatchObject({ width: 4, height: 2, viewportWidth: 2, viewportHeight: 1 });
+    expect(meta.message).toContain('multiplies x by 0.5000 and y by 0.5000');
+
+    const clickPromise = tools.simulateMouseInput('click', 3, 2, undefined, undefined, undefined, 'instance:test');
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const clickPending = claimQueuedRequest(bridge, 'session-1');
+    expect(clickPending?.request).toMatchObject({ endpoint: '/api/simulate-mouse-input', data: { x: 1.5, y: 1 } });
+    bridge.resolveRequest(clickPending!.requestId, { success: true });
+    const click = JSON.parse((await clickPromise).content[0].text);
+    expect(click).toMatchObject({ screenshotX: 3, screenshotY: 2, viewportScale: { x: 0.5, y: 0.5 } });
+
+    const sequencePromise = tools.simulateInputSequence([
+      { type: 'mouse', action: 'move', x: 2, y: 2 },
+      { type: 'wait', seconds: 0 },
+    ], undefined, 'instance:test');
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const sequencePending = claimQueuedRequest(bridge, 'session-1');
+    expect(sequencePending?.request.data.steps).toEqual([
+      { type: 'mouse', action: 'move', x: 1, y: 1 },
+      { type: 'wait', seconds: 0 },
+    ]);
+    bridge.resolveRequest(sequencePending!.requestId, { success: true });
+    await sequencePromise;
   });
 
   test('capture_screenshot falls back to CaptureService when StudioCaptureService is unavailable', async () => {

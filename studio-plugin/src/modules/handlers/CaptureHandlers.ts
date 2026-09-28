@@ -334,11 +334,15 @@ function captureStudio(requestData: Record<string, unknown>): unknown {
 	return result;
 }
 
+// CaptureService captures the framebuffer, which on a Retina display is twice ViewportSize,
+// while VirtualInput takes ViewportSize pixels. The logical size rides along so the server can
+// map screenshot pixels to input pixels (this fork).
 // Edit-mode single shot: capture and read back in the same (edit) context.
 function captureScreenshotData(): unknown {
 	const cap = doCaptureScreenshot();
 	if ("error" in cap) return cap;
-	return readContentToBase64(cap.contentId);
+	const read = readContentToBase64(cap.contentId);
+	return typeIs(read, "table") ? { ...(read as object), ...viewportSize() } : read;
 }
 
 function captureScreenshot(): unknown {
@@ -347,7 +351,8 @@ function captureScreenshot(): unknown {
 
 // Play-mode step 1 (run on the CLIENT): capture only, return the temp id.
 function captureBegin(): unknown {
-	return doCaptureScreenshot();
+	const cap = doCaptureScreenshot();
+	return "error" in cap ? cap : { ...cap, ...viewportSize() };
 }
 
 // Play-mode step 2 (run on EDIT): read pixels from a temp id captured elsewhere.

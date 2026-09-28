@@ -1588,11 +1588,11 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
         },
         x: {
           type: 'number',
-          description: 'Viewport pixel X; needed by all but delta.'
+          description: 'Screenshot pixel X; needed by all but delta.'
         },
         y: {
           type: 'number',
-          description: 'Viewport pixel Y; needed by all but delta.'
+          description: 'Screenshot pixel Y; needed by all but delta.'
         },
         dx: {
           type: 'number',

@@ -67,6 +67,10 @@ type RawImageCaptureResponse = {
   height?: number;
   nativeWidth?: number;
   nativeHeight?: number;
+  // Camera.ViewportSize, the space VirtualInput takes; the legacy CaptureService path's native
+  // size is the framebuffer, twice this on a Retina display.
+  viewportWidth?: number;
+  viewportHeight?: number;
   data?: string;
   instancePath?: string;
   instanceName?: string;
@@ -120,6 +124,8 @@ type EncodedViewportCapture = {
   success: true;
   width: number;
   height: number;
+  viewportWidth: number;
+  viewportHeight: number;
   format: 'jpeg' | 'png';
   quality?: number;
   note: string;
@@ -1050,6 +1056,9 @@ export class RobloxStudioTools {
   private hostWindowCapture: HostWindowCaptureFn = captureStudioWindow;
   private hostViewportRects = new Map<string, HostViewportRectCacheEntry>();
   private viewportCaptureQueues = new Map<string, Promise<void>>();
+  // The last capture_screenshot of each peer (`instanceId|role`): viewport pixels per image pixel,
+  // so the mouse tools can take x/y as read off that image (this fork).
+  private screenshotInputScales = new Map<string, { x: number; y: number }>();
 
   constructor(bridge: BridgeService) {
     this.client = new StudioHttpClient(bridge);
@@ -4997,13 +5006,15 @@ export class RobloxStudioTools {
     const refresh = this.bridge.refreshTopologyForRouting();
     if (refresh) await refresh;
     const { instanceId, clientRole } = this._resolveRuntime(instance_id);
+    const role = target || clientRole || 'edit';
+    const mapped = this._screenshotToViewport(instanceId, role, x, y);
     const response = await this._callSingle('/api/simulate-mouse-input', {
-      action, x, y, button, dx: extra?.dx, dy: extra?.dy, amount: extra?.amount
-    }, target || clientRole || 'edit', instanceId);
+      action, x: mapped.x, y: mapped.y, button, dx: extra?.dx, dy: extra?.dy, amount: extra?.amount
+    }, role, instanceId);
     return {
       content: [{
         type: 'text',
-        text: JSON.stringify(response)
+        text: JSON.stringify(mapped.scale ? { ...response as object, screenshotX: x, screenshotY: y, viewportScale: mapped.scale } : response)
       }]
     };
   }
@@ -5021,13 +5032,34 @@ export class RobloxStudioTools {
     const refresh = this.bridge.refreshTopologyForRouting();
     if (refresh) await refresh;
     const { instanceId, clientRole } = this._resolveRuntime(instance_id);
-    const response = await this._callSingle('/api/simulate-input-sequence', { steps },
-      target || clientRole || 'edit', instanceId, Math.ceil((waited + 15) * 1000));
+    const role = target || clientRole || 'edit';
+    const scale = this.screenshotInputScales.get(`${instanceId}|${role}`);
+    const mappedSteps = steps.map((step: unknown) => {
+      const s = step as Record<string, unknown>;
+      if (s?.type !== 'mouse') return step;
+      const mapped = this._screenshotToViewport(instanceId, role, s.x as number | undefined, s.y as number | undefined);
+      return { ...s, x: mapped.x, y: mapped.y };
+    });
+    const response = await this._callSingle('/api/simulate-input-sequence', { steps: mappedSteps },
+      role, instanceId, Math.ceil((waited + 15) * 1000));
     return {
       content: [{
         type: 'text',
-        text: JSON.stringify(response)
+        text: JSON.stringify(scale ? { ...response as object, viewportScale: scale } : response)
       }]
+    };
+  }
+
+  // Mouse x/y are read off the last capture_screenshot of the same peer; VirtualInput takes
+  // Camera.ViewportSize pixels, which on a Retina display are half the captured ones. Without a
+  // screenshot of that peer, or at 1:1, x/y pass through as viewport pixels.
+  private _screenshotToViewport(instanceId: string, role: string, x: number | undefined, y: number | undefined) {
+    const scale = this.screenshotInputScales.get(`${instanceId}|${role}`);
+    if (!scale) return { x, y };
+    return {
+      x: typeof x === 'number' ? x * scale.x : x,
+      y: typeof y === 'number' ? y * scale.y : y,
+      scale,
     };
   }
 
@@ -5318,13 +5350,18 @@ export class RobloxStudioTools {
         // the client to get the rbxtemp:// id, then read it back in the edit DM —
         // the rbxtemp handle is process-scoped and the edit/plugin identity is
         // allowed to promote it into a readable EditableImage.
-        const begin = await this._callSingle('/api/capture-begin', {}, targetRole, instanceId) as { contentId?: string; error?: string };
+        const begin = await this._callSingle('/api/capture-begin', {}, targetRole, instanceId) as {
+          contentId?: string; error?: string; viewportWidth?: number; viewportHeight?: number;
+        };
         if (begin.error) {
           response = { error: begin.error };
         } else if (!begin.contentId) {
           response = { error: 'Screenshot capture failed: no content id returned from client.' };
         } else {
           response = await this._callSingle('/api/capture-read', { contentId: begin.contentId }, 'edit', instanceId) as RawImageCaptureResponse;
+          // The edit peer read the pixels; the client's viewport is the one input lands in.
+          response.viewportWidth ??= begin.viewportWidth;
+          response.viewportHeight ??= begin.viewportHeight;
         }
       } else {
         // Edit mode: capture and read back in the same (edit) context.
@@ -5434,27 +5471,22 @@ export class RobloxStudioTools {
       note = ` — auto-reduced to q${usedQ} to fit the inline size limit; enlarge the Studio window or capture a smaller region for finer detail`;
     }
 
-    // Explicit coordinate contract: the image is returned at native viewport
-    // resolution whenever it fits the transport cap, so its pixel grid IS the
-    // coordinate space simulate_mouse_input expects. Oversized captures are
-    // downscaled in Studio before transfer; the message then tells the caller
-    // how to map image coordinates back to viewport coordinates.
-    const nativeW = response.nativeWidth ?? w;
-    const nativeH = response.nativeHeight ?? h;
+    // The image's pixels and the viewport's (Camera.ViewportSize, what VirtualInput takes) differ
+    // when Studio downscales an oversized capture and, on a Retina display, when the legacy
+    // CaptureService path returns the framebuffer at twice ViewportSize. capture_screenshot
+    // records the ratio so the mouse tools take image coordinates as they are (this fork).
+    const viewportW = response.viewportWidth ?? response.nativeWidth ?? w;
+    const viewportH = response.viewportHeight ?? response.nativeHeight ?? h;
     const message =
-      (nativeW !== w || nativeH !== h
-        ? `Screenshot ${w}x${h}px (${fmt}${fmt === 'jpeg' ? ` q${usedQ}` : ''})${note}, downscaled from the ` +
-          `${nativeW}x${nativeH} viewport to fit transport limits. For simulate_mouse_input, multiply x read off ` +
-          `this image by ${(nativeW / w).toFixed(4)} and y by ${(nativeH / h).toFixed(4)} to get viewport pixel ` +
-          `coordinates ((0,0) at the top-left).`
-        : `Screenshot ${w}x${h}px (${fmt}${fmt === 'jpeg' ? ` q${usedQ}` : ''})${note}. ` +
-          `For simulate_mouse_input, x/y are pixel coordinates in this exact image with (0,0) at the ` +
-          `top-left; it is not downscaled, so use coordinates as you read them off the image.`) + hostNote;
+      `Screenshot ${w}x${h}px (${fmt}${fmt === 'jpeg' ? ` q${usedQ}` : ''})${note}` +
+      (viewportW !== w || viewportH !== h ? ` of the ${viewportW}x${viewportH} viewport.` : '.') + hostNote;
 
     return {
       success: true,
       width: w,
       height: h,
+      viewportWidth: viewportW,
+      viewportHeight: viewportH,
       format: fmt,
       quality: fmt === 'jpeg' ? usedQ : undefined,
       note,
@@ -5658,6 +5690,8 @@ export class RobloxStudioTools {
       height: cropped.height,
       nativeWidth: viewportWidth,
       nativeHeight: viewportHeight,
+      viewportWidth,
+      viewportHeight,
       data: cropped.rgba.toString('base64'),
     };
   }
@@ -5666,10 +5700,20 @@ export class RobloxStudioTools {
     const refresh = this.bridge.refreshTopologyForRouting();
     if (refresh) await refresh;
     const { instanceId, clientRole } = this._resolveRuntime(instance_id);
-    const capture = await this._captureViewportImage(instanceId, clientRole ?? 'edit', format, quality);
+    const role = clientRole ?? 'edit';
+    const capture = await this._captureViewportImage(instanceId, role, format, quality);
     if (!capture.success) {
       return this._textResult({ error: capture.error, studioFastPathUnavailable: capture.studioFastPathUnavailable });
     }
+    const scale = { x: capture.viewportWidth / capture.width, y: capture.viewportHeight / capture.height };
+    const key = `${instanceId}|${role}`;
+    if (scale.x === 1 && scale.y === 1) this.screenshotInputScales.delete(key);
+    else this.screenshotInputScales.set(key, scale);
+    const message = `${capture.message} For simulate_mouse_input and simulate_input_sequence, x/y are pixel ` +
+      `coordinates in this exact image with (0,0) at the top-left; use coordinates as you read them off the image` +
+      (this.screenshotInputScales.has(key)
+        ? ` (the server multiplies x by ${scale.x.toFixed(4)} and y by ${scale.y.toFixed(4)} to reach viewport pixels).`
+        : '.');
 
     return {
       content: [
@@ -5681,7 +5725,9 @@ export class RobloxStudioTools {
             format: capture.format,
             mimeType: capture.mimeType,
             ...(capture.quality === undefined ? {} : { quality: capture.quality }),
-            message: capture.message,
+            viewportWidth: capture.viewportWidth,
+            viewportHeight: capture.viewportHeight,
+            message,
             source: capture.source,
             studioFastPathUnavailable: capture.studioFastPathUnavailable,
           }),

@@ -21,13 +21,11 @@
 // SendMouseDelta is the one a game reading GetMouseDelta sees: ten deltas of
 // -20 px with the cursor locked turned an aim by exactly what 200 real pixels do.
 //
-// Coordinate space: SendMouseButton coordinates are viewport pixels matching
-// what capture_screenshot returns (window space, origin at the top-left of the
-// rendered viewport). Pass screenshot pixel coordinates straight through. Note
-// that UserInputService reports input positions in GUI space, which is offset
-// from this by GuiService:GetGuiInset() (~58px on the Y axis) — irrelevant for
-// callers who pick coordinates off a screenshot, which is why we do not
-// translate here.
+// Coordinate space: VirtualInput takes Camera.ViewportSize pixels (origin at the top-left of the
+// rendered viewport, the top bar included). UserInputService reports input positions in GUI
+// space, offset from this by GuiService:GetGuiInset() (~58px on the Y axis). A screenshot can
+// have more pixels than the viewport (Retina, or a downscale), so the server maps x/y read off
+// the last capture_screenshot to viewport pixels before they reach this handler.
 
 import * as RenderMonitor from "../RenderMonitor";
 
