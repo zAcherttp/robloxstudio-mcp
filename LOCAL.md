@@ -62,6 +62,17 @@ is a conflict waiting at the next merge. What this fork carries on top of upstre
   tool call per step cost about 0.2 s. The catalog budget test went to 52 tools and 46,500
   characters, and the schema test maps the new tool.
 
+- **Mouse x/y are screenshot pixels** (`packages/core/src/tools/index.ts`,
+  `studio-plugin/.../CaptureHandlers.ts`). On a Retina Mac the CaptureService path returns the
+  framebuffer, twice `Camera.ViewportSize`, while `VirtualInput` takes ViewportSize pixels, so a
+  click read off the image landed at twice its position and the capture message said otherwise.
+  Every capture path now reports the viewport size (the plugin's legacy edit capture and
+  `capture-begin` add it; StudioCaptureService and host captures had it as their native size);
+  `capture_screenshot` records viewport/image per peer, and `simulate_mouse_input` and mouse steps
+  of `simulate_input_sequence` scale x/y by it, reporting the factor. The capture message names
+  both sizes and replaces upstream's "multiply by" advice for downscaled captures, which would
+  now scale twice. No screenshot of a peer yet: x/y pass through as viewport pixels.
+
 - **Eval results keep every key** (`studio-plugin/.../LuauExec.ts`: `__mcp_safe` in the wrapper,
   `jsonSafe` in the plugin). A table with a list part lost its other keys twice over: crossing the
   runtime evals' `BindableFunction` (which keeps only the list part), then in `JSONEncode`, which

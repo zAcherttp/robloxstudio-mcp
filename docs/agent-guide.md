@@ -173,6 +173,32 @@ behind other windows, in edit mode and during a playtest.
 Screenshots answer "does this look right". They do not answer "is this correct": for that, read
 the numbers back.
 
+## Clicking
+
+`simulate_mouse_input` (and mouse steps of `simulate_input_sequence`) take **x/y as read off the
+last `capture_screenshot` of the same peer**. The engine's virtual mouse takes viewport pixels
+(`Camera.ViewportSize`, origin at the top-left, top bar included), and a screenshot can have
+more: on a Retina Mac Studio's CaptureService returns the framebuffer, 2118x1386 for a 1059x693
+viewport. The capture result names both sizes and the factor, and the server applies it.
+
+- **Before any screenshot of that peer**, x/y are viewport pixels. Computed ones work directly:
+  `Camera:WorldToViewportPoint(p)`, or a `GuiObject.AbsolutePosition` plus
+  `GuiService:GetGuiInset()` (about 58 px down) when its ScreenGui does not ignore the inset.
+  After a screenshot, divide those by the factor the capture reported.
+- **BillboardGui buttons take virtual clicks** like a real mouse's (verified 2026-09-28:
+  InputBegan, MouseButton1Click and Activated all fired). No layer-collector argument is needed;
+  `VirtualInput:SendMouseButton` has none (`VirtualInputManager`'s, which does, is closed to
+  plugins). They need what a
+  real mouse needs: the BillboardGui in **PlayerGui** with `Adornee` set and **`Active` true**.
+  One parented under a part in Workspace, or with `Active` false, gets nothing; the click reaches
+  `UserInputService` unprocessed.
+- **Aim at a billboard from its adornee**, not from its button: a BillboardGui descendant's
+  `AbsolutePosition` is in the billboard's own space ((0,0) at its corner), and so is the
+  `InputObject.Position` its button receives. `Camera:WorldToViewportPoint(adornee.Position)` is
+  the billboard's centre in viewport pixels (before any `StudsOffset` or `ExtentsOffset`).
+- **An `AlwaysOnTop` BillboardGui is missing from CaptureService screenshots** yet still clickable.
+  Turn `AlwaysOnTop` off to see it, or aim from the adornee.
+
 ## Studio's own CPU and memory
 
 **Where to look.** The OS view is ground truth. On macOS: `footprint <pid>` for memory,
