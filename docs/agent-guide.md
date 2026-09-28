@@ -173,6 +173,29 @@ behind other windows, in edit mode and during a playtest.
 Screenshots answer "does this look right". They do not answer "is this correct": for that, read
 the numbers back.
 
+### Catching a moment
+
+A screenshot lands later than the call before it returns, so a moment that lasts a second or two
+(an effect, a beat of a reel) is easily missed. Measured with a clock drawn on screen, so each
+capture shows when it was taken (Globeshot, 2026-09-29; Studio on a Mac, solo playtest, the
+client peer):
+
+| How the screenshot follows the wait | Lag after the wait returned |
+|---|---|
+| The next call in the same batch of tool calls | 0.92, 0.94, 0.90 s: steady, about **0.92 s** |
+| A call in the agent's next turn | 1 to 3 s more, and it varies: the moment is usually gone |
+
+- **Put the wait and the screenshot in one batch**: an `eval_client_runtime` that waits until the
+  moment, then `capture_screenshot` as the very next call.
+- **End the wait 0.92 s early**: wait until the moment's time less the lag, so the capture lands
+  on it. For a moment shorter than about 0.2 s, stretch it instead (slow motion, or hold it).
+- **Time from the game's own clock**: record `os.clock()` in the client when the run starts (a
+  `_G` value) and wait against it; each eval is a new call, so time from one eval to the next is
+  not the game's.
+- **Re-measure when the setup changes** (another machine, a multiplayer group, the server peer):
+  draw `os.clock()` on a ScreenGui, capture a few times after known waits, read the numbers off
+  the images, and add them here.
+
 ## Clicking
 
 `simulate_mouse_input` (and mouse steps of `simulate_input_sequence`) take **x/y as read off the
