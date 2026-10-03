@@ -1027,7 +1027,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
     // Not 'read': it runs Luau in the edit session through execute_luau, which the read-only
     // Inspector must never reach. It changes nothing.
     category: 'write',
-    description: 'Use to check Studio, and a running playtest, run what is on disk: Rojo project scripts compared by content.',
+    description: 'Use to check Studio and a running playtest run what is on disk: Rojo scripts compared by content.',
     inputSchema: {
       type: 'object',
       properties: {
