@@ -1,5 +1,5 @@
 import * as childProcess from 'child_process';
-import { existsSync, mkdtempSync, rmSync } from 'fs';
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { promisify } from 'util';
@@ -210,7 +210,7 @@ describe('native macOS close verification', () => {
     rmSync(registryDir, { recursive: true, force: true });
   });
 
-  test('SIGTERM success is not exit proof; probe the PID and never escalate to SIGKILL', async () => {
+  test('SIGTERM success is not exit proof; probe the PID and do not escalate before the force grace', async () => {
     const signalled = Promise.withResolvers<void>();
     const kill = jest.spyOn(process, 'kill').mockImplementation((pid, signal) => {
       expect(pid).toBe(4242);
@@ -224,6 +224,50 @@ describe('native macOS close verification', () => {
     expect(kill).toHaveBeenCalledWith(4242, 0);
     expect(kill).not.toHaveBeenCalledWith(4242, 'SIGKILL');
     expect(record.closedAt).toBeUndefined();
+  });
+
+  test('a scratch Studio held by a dialog is killed after the force grace and its place lock removed', async () => {
+    const placeDir = mkdtempSync(path.join(os.tmpdir(), 'studio-macos-place-'));
+    const place = path.join(placeDir, 'scratch.rbxl');
+    writeFileSync(place, '');
+    writeFileSync(`${place}.lock`, '');
+    record.localPlaceFile = place;
+    manager = new StudioInstanceManager({
+      registryDir,
+      processAdapter: { currentBootId: () => 'macos-close-test' },
+      closeTimeoutMs: 1000,
+      forceCloseGraceMs: 100,
+    });
+    let killed = false;
+    const kill = jest.spyOn(process, 'kill').mockImplementation((_pid, signal) => {
+      if (signal === 'SIGKILL') killed = true;
+      if (signal === 0 && killed) throw Object.assign(new Error('ESRCH'), { code: 'ESRCH' });
+      return true;
+    });
+    const outcome = manager.close(record);
+    await jest.advanceTimersByTimeAsync(400);
+    await expect(outcome).resolves.toMatchObject({ status: 'closed' });
+    expect(kill).toHaveBeenCalledWith(4242, 'SIGTERM');
+    expect(kill).toHaveBeenCalledWith(4242, 'SIGKILL');
+    expect(existsSync(`${place}.lock`)).toBe(false);
+    expect(existsSync(place)).toBe(true);
+    rmSync(placeDir, { recursive: true, force: true });
+  });
+
+  test('a Studio not launched from a local place file is never killed', async () => {
+    record.source = 'published_place';
+    manager = new StudioInstanceManager({
+      registryDir,
+      processAdapter: { currentBootId: () => 'macos-close-test' },
+      closeTimeoutMs: 1000,
+      forceCloseGraceMs: 100,
+    });
+    const kill = jest.spyOn(process, 'kill').mockReturnValue(true);
+    const outcome = manager.close(record).catch((error: unknown) => error);
+    await jest.advanceTimersByTimeAsync(1000);
+    expect(await outcome).toEqual(expect.objectContaining({ message: expect.stringMatching(/still running/) }));
+    expect(kill).toHaveBeenCalledWith(4242, 'SIGTERM');
+    expect(kill).not.toHaveBeenCalledWith(4242, 'SIGKILL');
   });
 
   test.each(['ESRCH', 'EPERM'])('PID probe %s distinguishes exit from an unverifiable process', async (code) => {

@@ -17,4 +17,6 @@ PLUGIN    Correction to the line above: Studio did reload the changed plugin fil
           → after build:plugin, test something only the new plugin does; quit Studio only if it is still old
 SERVER    Killing this session's MCP server process makes Claude Code start a fresh one on the next tool call
           → to load a server change without restarting Claude Code, kill only the node process whose parent is this session's
+STUDIO    On macOS, Studio exec'd directly exited before opening its place; a loaded Studio ignored SIGTERM, and a dialog (low resources, save prompt) holds a quit
+          → launch through `open -g -n -a` and force-close only Studios running a local place file (`manage_instance` does both)
 ```

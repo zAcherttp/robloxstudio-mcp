@@ -129,6 +129,23 @@ is a conflict waiting at the next merge. What this fork carries on top of upstre
 - **Docs for a team:** a fork quickstart at the top of `README.md`, `docs/agent-guide.md`
   (driving Studio as an agent, game-agnostic), `docs/roblox-skills.md`, and `docs/workshop/`.
 
+- **`manage_instance` launches and closes Studio on macOS** (`packages/core/src/studio-macos.ts`,
+  hooks in `studio-instance-manager.ts`). Measured 2026-10-06 with eight Studios open: exec'ing the
+  binary (upstream's launch) exited with code 1 after about 24 s, never connecting; the same arguments
+  through `open -n -a` stopped at a "Low System Resources" dialog, so the direct exec likely hit that
+  check with no window to show it in; LaunchServices is the supported way to start a Mac app anyway.
+  Launch now goes through `open -g -n -a` (background: Studio was frontmost in 0 of 90 samples over
+  45 s) and finds the new PID by its exact arguments. Process enumeration keeps only
+  `.app/Contents/MacOS/RobloxStudio` executables (pgrep also listed the crash handler, StudioMCP
+  and their wrappers) with their command lines, and a connected instance is matched by the basename
+  of its `--localPlaceFile`, never by "the only Studio" (macOS has no window titles). Close: SIGTERM,
+  and for a Studio running a local place file (a managed `local_file`/`baseplate` launch or a matched
+  connected instance) SIGKILL after `forceCloseGraceMs` (2 s), then the place's `.lock` is removed.
+  Studio ignored SIGTERM with its place loaded and no dialog up, and a quit Apple Event with the
+  low-resources dialog up (a save prompt would hold it the same way). Upstream's
+  test "never escalate to SIGKILL" now holds only before the grace and for other sources. Live:
+  launch 0.3 s, place open 5.4 s, close 3.5 s, lock gone; a Studio without a place file is refused.
+
 ## How Claude Code runs it
 
 `~/.local/bin/robloxstudio-mcp-local` sources `~/.zshrc.local` for

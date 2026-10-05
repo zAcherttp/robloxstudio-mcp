@@ -18,6 +18,14 @@ import {
   type StudioPlatformCapabilities,
   type StudioProcessIdentityLauncher,
 } from './studio-platform.js';
+import {
+  appBundleOf,
+  findMacProcessForConnectedInstance,
+  launchMacStudio,
+  localPlaceFileOf,
+  MAC_FORCE_CLOSE_GRACE_MS,
+  parseMacStudioProcesses,
+} from './studio-macos.js';
 
 export type StudioLaunchSource = 'baseplate' | 'local_file' | 'published_place' | 'place_revision';
 
@@ -146,6 +154,8 @@ export interface StudioInstanceManagerOptions {
   snapshotCacheMs?: number;
   launchCompletionTimeoutMs?: number;
   closeTimeoutMs?: number;
+  /** macOS: how long a scratch Studio may ignore SIGTERM before it is killed. */
+  forceCloseGraceMs?: number;
   /**
    * Wait before terminating a Studio (identified by its creation FILETIME)
    * so an in-progress automatic sign-in can persist its rotated credential.
@@ -234,6 +244,21 @@ async function beforeCloseDeadline<T>(
     return await Promise.race([operation(), promise]);
   } finally {
     clearTimeout(timer);
+  }
+}
+
+function isMac(): boolean {
+  return process.platform === 'darwin';
+}
+
+// Studio leaves `<place>.lock` behind when it is killed; the next open of the
+// same file would then report it as in use.
+function removePlaceLock(localPlaceFile: string | undefined): void {
+  if (!localPlaceFile) return;
+  try {
+    rmSync(`${localPlaceFile}.lock`, { force: true });
+  } catch {
+    // Best effort, like the baseplate cleanup.
   }
 }
 
@@ -1360,14 +1385,7 @@ export function listStudioProcesses(): StudioProcessInfo[] {
       if ((error as { status?: unknown }).status === 1) return [];
       throw new Error(`Could not enumerate Roblox Studio processes: ${error instanceof Error ? error.message : String(error)}`);
     }
-    return out
-      .split('\n')
-      .filter(Boolean)
-      .map((line) => {
-        const [pid, ...rest] = line.trim().split(/\s+/);
-        return { Id: Number(pid), Name: 'RobloxStudio', Path: rest.join(' '), MainWindowTitle: '' };
-      })
-      .filter((proc) => Number.isFinite(proc.Id));
+    return parseMacStudioProcesses(out);
   }
 
   if (process.platform !== 'win32' && !isWsl()) return [];
@@ -1391,15 +1409,7 @@ export async function observeStudioProcesses(timeoutMs = 15000): Promise<StudioP
         if (Number(code) === 1) return { status: 'ok', observedAt, processes: [] };
         throw error;
       }
-      const processes = out
-        .split('\n')
-        .filter(Boolean)
-        .map((line) => {
-          const [pid, ...rest] = line.trim().split(/\s+/);
-          return { Id: Number(pid), Name: 'RobloxStudio', Path: rest.join(' '), MainWindowTitle: '' };
-        })
-        .filter((proc) => Number.isFinite(proc.Id));
-      return { status: 'ok', observedAt, processes };
+      return { status: 'ok', observedAt, processes: parseMacStudioProcesses(out) };
     }
 
     if (process.platform !== 'win32' && !isWsl()) {
@@ -1519,6 +1529,7 @@ export class StudioInstanceManager {
   private readonly snapshotCacheMs: number;
   private readonly launchCompletionTimeoutMs: number;
   private readonly closeTimeoutMs: number;
+  private readonly forceCloseGraceMs: number;
   private readonly settleSignIn?: (processStartedAtFileTime: string) => Promise<unknown>;
   private coordinatorTimer?: ReturnType<typeof setInterval>;
   private coordinatorRefresh?: Promise<void>;
@@ -1536,8 +1547,18 @@ export class StudioInstanceManager {
     this.snapshotCacheMs = options.snapshotCacheMs ?? 0;
     this.launchCompletionTimeoutMs = options.launchCompletionTimeoutMs ?? LAUNCH_COMPLETION_TIMEOUT_MS;
     this.closeTimeoutMs = options.closeTimeoutMs ?? 10000;
+    this.forceCloseGraceMs = options.forceCloseGraceMs ?? MAC_FORCE_CLOSE_GRACE_MS;
     this.settleSignIn = options.settleSignIn ??
       (!this.processAdapter.stopProcess && (process.platform === 'win32' || isWsl()) ? settleWindowsStudioSignIn : undefined);
+  }
+
+  // macOS with the built-in process handling (no adapter): processes come from
+  // pgrep with command lines, and closing is by signal.
+  private nativeMac(): boolean {
+    return isMac() &&
+      !this.processAdapter.listStudioProcesses &&
+      !this.processAdapter.observeStudioProcesses &&
+      !this.processAdapter.stopProcess;
   }
 
   getLifecycleCapabilities(): StudioLifecycleCapabilities {
@@ -1830,6 +1851,23 @@ export class StudioInstanceManager {
           processEnvironment,
           studioWorkingDirectory,
         );
+      } else if (
+        process.platform === 'darwin' &&
+        !processEnvironment?.remove?.length &&
+        studioWorkingDirectory === undefined &&
+        appBundleOf(exe) !== undefined
+      ) {
+        proc = await launchMacStudio(appBundleOf(exe)!, args, processEnvironment?.set, {
+          runOpen: (openArgs) => runAsync('open', openArgs),
+          listProcesses: async () => {
+            const snapshot = await this.readProcessSnapshot();
+            if (snapshot.status === 'error') throw new Error(snapshot.error);
+            return snapshot.processes;
+          },
+          isAlive: (pid) => observePosixProcess(pid).status !== 'not_running',
+          delay,
+          now: Date.now,
+        });
       } else {
         const child = spawn(exe, args, spawnOptions);
         proc = {
@@ -2129,6 +2167,7 @@ export class StudioInstanceManager {
         record.nativeProcessStartedAt,
         abort,
         deadline,
+        this.nativeMac() && !abort && (record.source === 'local_file' || record.source === 'baseplate'),
       );
     } catch (error) {
       if (error instanceof StudioCloseVerificationError) {
@@ -2171,6 +2210,7 @@ export class StudioInstanceManager {
     record.lastSuccessfulProcessObservationAt = closedAt;
     record.lastProcessObservationError = undefined;
     this.cleanupManagedRecord(record);
+    if (this.nativeMac() && record.source === 'local_file') removePlaceLock(record.localPlaceFile);
     this.markClosedInMemory(record);
     await this.persist(record);
     return {
@@ -2190,10 +2230,14 @@ export class StudioInstanceManager {
     }
     const process = this.findProcessForConnectedInstance(instance, snapshot.processes);
     if (!process) {
-      throw new Error(`Could not find a Studio process for connected instance "${instance.instanceId}".`);
+      throw new Error(
+        `Could not find a Studio process for connected instance "${instance.instanceId}".` +
+          (this.nativeMac() ? ' On macOS only a Studio opened from a local place file (--localPlaceFile) can be closed.' : ''),
+      );
     }
     deadline = await this.beforeStudioStop(process.StartTimeUtcFileTime, deadline);
-    await this.closeProcess(process.Id, process.StartTimeUtcFileTime, undefined, deadline);
+    await this.closeProcess(process.Id, process.StartTimeUtcFileTime, undefined, deadline, this.nativeMac());
+    if (this.nativeMac()) removePlaceLock(localPlaceFileOf(process.CommandLine ?? process.Path));
   }
 
   private async beforeStudioStop(startedAt: string | undefined, deadline: number): Promise<number> {
@@ -2213,8 +2257,10 @@ export class StudioInstanceManager {
     startedAt?: string,
     stop?: () => unknown | Promise<unknown>,
     deadline = Date.now() + this.closeTimeoutMs,
+    force = false,
   ): Promise<void> {
     this.cachedSnapshot = undefined;
+    let killAt: number | undefined;
     await beforeCloseDeadline(async () => {
       if (stop) {
         await stop();
@@ -2231,6 +2277,7 @@ export class StudioInstanceManager {
         } catch (error) {
           if (!(error instanceof Error) || !('code' in error) || error.code !== 'ESRCH') throw error;
         }
+        if (force) killAt = Date.now() + this.forceCloseGraceMs;
       }
     }, deadline, processId);
 
@@ -2246,6 +2293,16 @@ export class StudioInstanceManager {
           `Could not verify Studio process ${processId} termination: ${observation.error}`,
           observation,
         );
+      }
+      if (killAt !== undefined && Date.now() >= killAt) {
+        // A modal dialog (save changes, low resources) holds the SIGTERM; a forced
+        // close is only asked for a scratch Studio running a local place file.
+        killAt = undefined;
+        try {
+          process.kill(processId, 'SIGKILL');
+        } catch (error) {
+          if (!(error instanceof Error) || !('code' in error) || error.code !== 'ESRCH') throw error;
+        }
       }
       const remaining = deadline - Date.now();
       if (remaining <= 0) {
@@ -2294,6 +2351,7 @@ export class StudioInstanceManager {
     instance: ConnectedStudioInstance,
     processes: StudioProcessInfo[],
   ): StudioProcessInfo | undefined {
+    if (this.nativeMac()) return findMacProcessForConnectedInstance(instance, processes);
     if (processes.length === 0) return undefined;
     if (processes.length === 1) return processes[0];
 

@@ -3,6 +3,17 @@
 Status of this fork, newest on top. What the fork carries on top of upstream is in
 [LOCAL.md](LOCAL.md); how to drive Studio is in [docs/agent-guide.md](docs/agent-guide.md).
 
+## Picking up here (2026-10-06, Studio opens in the background and closes)
+
+**`manage_instance` launches and closes Studio on macOS** (branch `feat/macos-studio-close`). Launch goes
+through `open -g -n -a`, so Studio loads behind whatever you are doing; `close` force-quits a Studio
+running a local place file after a 2 s grace and clears its `.lock`; a Studio not opened from a local
+file is refused. Details and measurements in [LOCAL.md](LOCAL.md).
+
+**Loaded:** nothing yet. Built and live-tested from the branch worktree only; the main checkout's
+`dist` (what every session's server runs) still has the old launch and close until it is merged
+and built, and each session's server restarted.
+
 ## Picking up here (2026-09-28, clicks land where the screenshot shows)
 
 **Mouse x/y are screenshot pixels now** (`34d1ee3`). On a Retina Mac the CaptureService path

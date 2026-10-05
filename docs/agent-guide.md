@@ -87,6 +87,14 @@ for a string you just wrote.
 watching. A probe that anchors or moves their character and does not undo it, error path
 included, reads to them as a broken game.
 
+**Open scratch places with `manage_instance`, and close them with it.** A Studio an agent opens
+for itself (`launch`, `source: "local_file"`) is managed: on macOS it starts in the background
+(`open -g`, it never takes the front while loading) and `close` with its `launch_id` ends it. Close
+force-quits a Studio running a local place file when it ignores the polite quit, because a save
+prompt or the "Low System Resources" dialog (many Studios open) holds it, and clears the file's
+`.lock`; unsaved changes in that place are lost. A Studio not opened from a local file is never
+closed on macOS. Killing Studio from a shell instead can be refused by a client's command policy.
+
 **Give the agent a way in that is not clicking.** A feature only reachable by playing cannot be
 verified by an agent. Whatever architecture you choose, give each gameplay feature a
 Studio-only entry point (a command, a bindable, a debug function) that calls **the same server
