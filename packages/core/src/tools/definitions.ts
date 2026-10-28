@@ -27,7 +27,7 @@ const OPERATION_ID_PROPERTY = {
   type: 'string',
   minLength: 1,
   maxLength: MAX_OPERATION_ID_LENGTH,
-  description: 'Unique recovery ID; reuse only for identical arguments.'
+  description: 'Recovery ID; reuse only with identical arguments.'
 } as const;
 
 /** Script classes a classFilter names exactly; "Script" excludes LocalScript and ModuleScript. */
@@ -424,7 +424,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
         operation_id: OPERATION_ID_PROPERTY,
         file: {
           type: 'string',
-          description: '.luau file to run instead of code; relative to the project.'
+          description: 'Project-relative .luau to run instead of code.'
         },
         code: {
           type: 'string',
@@ -451,27 +451,27 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
         operation_id: OPERATION_ID_PROPERTY,
         file: {
           type: 'string',
-          description: '.luau file to run instead of code; relative to the project.'
+          description: 'Project-relative .luau to run instead of code.'
         },
         background: {
           type: 'boolean',
-          description: 'Run in its own thread and return a job id at once.'
+          description: 'Run in a thread; returns a job id.'
         },
         job: {
           type: 'string',
-          description: 'Job id: return its state, value, error and output.'
+          description: 'Read a job: state, value, error, output.'
         },
         wait: {
           type: 'number',
-          description: 'With job: seconds to wait for it to finish, up to 25.'
+          description: 'With job: wait up to N s (max 25).'
         },
         output_from: {
           type: 'number',
-          description: 'With job: skip output lines already read (output_next).'
+          description: 'With job: first unread line (output_next).'
         },
         code: {
           type: 'string',
-          description: 'Luau code; return a value to include it in the result.'
+          description: 'Luau; returned values come back.'
         },
         instance_id: {
           type: 'string',
@@ -490,27 +490,27 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
         operation_id: OPERATION_ID_PROPERTY,
         file: {
           type: 'string',
-          description: '.luau file to run instead of code; relative to the project.'
+          description: 'Project-relative .luau to run instead of code.'
         },
         background: {
           type: 'boolean',
-          description: 'Run in its own thread and return a job id at once.'
+          description: 'Run in a thread; returns a job id.'
         },
         job: {
           type: 'string',
-          description: 'Job id: return its state, value, error and output.'
+          description: 'Read a job: state, value, error, output.'
         },
         wait: {
           type: 'number',
-          description: 'With job: seconds to wait for it to finish, up to 25.'
+          description: 'With job: wait up to N s (max 25).'
         },
         output_from: {
           type: 'number',
-          description: 'With job: skip output lines already read (output_next).'
+          description: 'With job: first unread line (output_next).'
         },
         code: {
           type: 'string',
-          description: 'Luau code; return a value to include it in the result.'
+          description: 'Luau; returned values come back.'
         },
         target: {
           type: 'string',
@@ -596,28 +596,28 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
         action: {
           type: 'string',
           enum: ['launch', 'authorize', 'complete', 'close', 'status', 'list_place_versions'],
-          description: 'Operation; authorize and complete only resume identity launches.'
+          description: 'authorize and complete resume identity launches.'
         },
         source: {
           type: 'string',
           enum: ['baseplate', 'local_file', 'published_place', 'place_revision'],
-          description: 'Launch source; local_file needs path, published needs place_id.'
+          description: 'local_file needs local_place_file; published, place_id.'
         },
         local_place_file: {
           type: 'string',
-          description: '.rbxl or .rbxlx path; required for local_file.'
+          description: '.rbxl or .rbxlx for local_file.'
         },
         place_id: {
           type: 'number',
-          description: 'Place ID; required for published sources and version listing.'
+          description: 'For published sources and versions.'
         },
         place_version: {
           type: 'number',
-          description: 'Revision number; required for place_revision.'
+          description: 'For place_revision.'
         },
         require_process_identity: {
           type: 'boolean',
-          description: 'Require PID attestation and explicit authorization.'
+          description: 'PID attestation and an authorize step.'
         },
         wait_for_connection: {
           type: 'boolean',
@@ -625,23 +625,23 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
         },
         timeout_ms: {
           type: 'number',
-          description: 'Plugin timeout in ms; default 120000; ignored in identity mode.'
+          description: 'Connect timeout ms; default 120000.'
         },
         studio_executable: {
           type: 'string',
-          description: 'Exact Studio executable for launch; otherwise auto-discovered.'
+          description: 'Studio binary; found if omitted.'
         },
         studio_working_directory: {
           type: 'string',
-          description: 'Studio process working directory; isolates relative plugin folders per launch.'
+          description: 'Studio cwd; isolates plugin folders.'
         },
         process_environment: {
           type: 'object',
-          description: 'Launch-only environment changes; never stored.',
+          description: 'Launch-only env changes.',
           properties: {
             set: {
               type: 'object',
-              description: 'Environment variables to set.',
+              description: 'Set.',
               propertyNames: {
                 pattern: '^[A-Za-z_][A-Za-z0-9_]*$'
               },
@@ -651,7 +651,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
             },
             remove: {
               type: 'array',
-              description: 'Environment variables to remove.',
+              description: 'Remove.',
               items: {
                 type: 'string',
                 pattern: '^[A-Za-z_][A-Za-z0-9_]*$'
@@ -662,23 +662,23 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
         },
         max_page_size: {
           type: 'number',
-          description: 'Versions per page; clamped to 1-50, default 10.'
+          description: 'Versions per page, 1-50.'
         },
         page_token: {
           type: 'string',
-          description: 'Prior list_place_versions page token.'
+          description: 'Prior page token.'
         },
         instance_id: {
           type: 'string',
-          description: 'Studio process ID for close or status; excludes launch_id.'
+          description: 'For close or status; not with launch_id.'
         },
         launch_id: {
           type: 'string',
-          description: 'Launch for close or status; excludes instance_id.'
+          description: 'For close or status; not with instance_id.'
         },
         verbose: {
           type: 'boolean',
-          description: 'Full process record for launch and close.'
+          description: 'Full reply.'
         }
       },
       required: ['action']
@@ -725,7 +725,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
         ms: {
           type: 'number',
           minimum: 0,
-          description: 'Round trip ms, split both ways, no jitter or loss; replaces profile.'
+          description: 'Round trip ms, no jitter or loss; replaces profile.'
         },
         profile: {
           type: 'string',
@@ -743,41 +743,41 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
             InboundNetworkMinDelayMs: {
               type: 'number',
               minimum: 0,
-              description: 'Server-to-client minimum delay in ms.'
+              description: 'In delay ms.'
             },
             OutboundNetworkMinDelayMs: {
               type: 'number',
               minimum: 0,
-              description: 'Client-to-server minimum delay in ms.'
+              description: 'Out delay ms.'
             },
             InboundNetworkJitterMs: {
               type: 'number',
               minimum: 0,
-              description: 'Server-to-client jitter in ms.'
+              description: 'In jitter ms.'
             },
             OutboundNetworkJitterMs: {
               type: 'number',
               minimum: 0,
-              description: 'Client-to-server jitter in ms.'
+              description: 'Out jitter ms.'
             },
             InboundNetworkLossPercent: {
               type: 'number',
               minimum: 0,
               maximum: 0.5,
-              description: 'Server-to-client packet loss percent.'
+              description: 'In loss %.'
             },
             OutboundNetworkLossPercent: {
               type: 'number',
               minimum: 0,
               maximum: 0.5,
-              description: 'Client-to-server packet loss percent.'
+              description: 'Out loss %.'
             }
           },
-          description: 'NetworkSettings fields that override or define the profile.'
+          description: 'NetworkSettings overrides.'
         },
         verbose: {
           type: 'boolean',
-          description: 'Full per-client JSON.'
+          description: 'Full reply.'
         },
         instance_id: {
           type: 'string',
@@ -1072,20 +1072,20 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
         },
         exact: {
           type: 'boolean',
-          description: 'filter must equal the whole message.'
+          description: 'filter matches whole messages.'
         },
         exclude: {
           type: 'array',
           items: { type: 'string' },
-          description: 'Drop messages containing any of these.'
+          description: 'Drop messages containing these.'
         },
         next_cursor: {
           type: 'boolean',
-          description: 'Return a cursor for the next read.'
+          description: 'Return nextCursor.'
         },
         verbose: {
           type: 'boolean',
-          description: 'Raw entries with timestamps, noise and cursor.'
+          description: 'Raw entries and cursor.'
         }
       }
     }
@@ -1721,11 +1721,11 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
         },
         full_size: {
           type: 'boolean',
-          description: 'Every viewport pixel; default is half size.'
+          description: 'Full size; default half.'
         },
         verbose: {
           type: 'boolean',
-          description: 'Format, source and input-coordinate notes.'
+          description: 'Full reply.'
         },
         instance_id: {
           type: 'string',
@@ -2272,6 +2272,18 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
     }
   },
 ];
+
+// Listed only after more_tools enables them (this fork): each was called at most 17 times across
+// every local agent transcript on 2026-10-28, against thousands for execute_luau and the evals,
+// and together they were over half the catalog. ROBLOXSTUDIO_MCP_ALL_TOOLS=1 lists them all.
+export const DEFERRED_TOOLS: ReadonlySet<string> = new Set([
+  'capture_micro_profiler', 'capture_heap_snapshot', 'capture_device_matrix', 'get_memory_breakdown',
+  'get_scene_analysis', 'breakpoints', 'get_device_simulator_state', 'reset_simulation_state',
+  'manage_experience', 'manage_monetization', 'generate_model', 'search_assets', 'preview_asset',
+  'insert_asset', 'get_asset_thumbnail', 'get_asset_details', 'import_rbxm', 'get_project_structure',
+  'grep_scripts', 'find_and_replace_in_scripts', 'edit_script_lines', 'insert_script_lines',
+  'delete_script_lines', 'get_attributes', 'get_roblox_skills',
+]);
 
 export const getReadOnlyTools = () =>
   TOOL_DEFINITIONS.filter(t => t.category === 'read' && t.inspector !== false);
