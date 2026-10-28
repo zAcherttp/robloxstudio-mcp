@@ -47,7 +47,7 @@ describe('background eval jobs', () => {
   test('background asks the plugin to keep the payload; job reads status in the same VM', async () => {
     const bridge = new BridgeService();
     const tools = new RobloxStudioTools(bridge);
-    const request = jest.fn(async (..._args: unknown[]) => ({ bridge: 'ok', ok: true, result: { job: 'x', state: 'running' } }));
+    const request = jest.fn<Promise<unknown>, unknown[]>(async () => ({ bridge: 'ok', ok: true, result: { job: 'x', state: 'running' } }));
     (tools as unknown as { _callSingle: unknown })._callSingle = request;
     await TOOL_HANDLERS.eval_server_runtime(tools, { code: 'task.wait(60)', background: true });
     expect(request.mock.calls[0][0]).toBe('/api/eval-runtime');
