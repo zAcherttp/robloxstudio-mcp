@@ -105,6 +105,17 @@ is a conflict waiting at the next merge. What this fork carries on top of upstre
   characters, launch 676 to 88, a 20-line log read 1,616 to 313, a 1812x1306 screenshot about 2,400
   to 800 image tokens.
 
+- **Luau from a file, and background evals** (`readLuauSource`, `buildEvalJobLuau` in
+  `packages/core/src/tools/index.ts`; `EvalRuntimeHandlers.ts`). `execute_luau` and `eval_*_runtime`
+  take `file`, a `.luau` read on the server relative to the project, instead of `code`, so a test
+  script is not pasted into each call (8-13 KB a call in one session). `background: true` runs the
+  eval's code in its own thread and returns a job id at once; `job` (with `wait` up to 25 s and
+  `output_from`) reads its state, value, error and prints from `_G.__mcp_jobs` in the same VM, and
+  forgets it once finished and read. The wrapper puts everything before the caller's code on its
+  first line, so line numbers stay the caller's. The plugin unparents a background eval's payload
+  module instead of destroying it (the job destroys it when it ends); an older plugin destroys it,
+  and the job may die with it.
+
 - **A registry of running servers** (`packages/core/src/server-registry.ts`, `scripts/servers.mjs`,
   `npm run servers`). Every MCP client session starts its own server (Claude Code: one per
   session, in every project when configured at user level), and each keeps the code it started

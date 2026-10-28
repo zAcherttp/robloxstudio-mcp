@@ -2508,7 +2508,8 @@ export class RobloxStudioTools {
     };
   }
 
-  async executeLuau(code: string, target?: string, instance_id?: string, operation_id?: string) {
+  async executeLuau(code: string, target?: string, instance_id?: string, operation_id?: string, options: { file?: string } = {}) {
+    code = readLuauSource(code, options.file, 'execute_luau');
     if (!code) {
       throw new Error('Code is required for execute_luau');
     }
@@ -2546,12 +2547,27 @@ export class RobloxStudioTools {
     return response?.error ?? 'the prelude did not run';
   }
 
-  async evalServerRuntime(code: string, instance_id?: string, operation_id?: string) {
+  // A background eval's state, read in the VM that runs it: running, done or error, its value or
+  // error, and the output it printed since output_from. `wait` blocks until it finishes, up to
+  // 25 s. A finished job is forgotten once read.
+  private async _evalJobStatus(options: EvalJobOptions, target: string | TargetChoice, instance_id?: string) {
+    const job = options.job as string;
+    if (!/^[A-Za-z0-9_-]{1,64}$/.test(job)) throw new Error('job must be the id a background eval returned');
+    const wait = Math.max(0, Math.min(EVAL_JOB_MAX_WAIT_S, Number(options.wait ?? 0) || 0));
+    const from = Math.max(0, Math.floor(Number(options.output_from ?? 0) || 0));
+    const response = await this._callSingle('/api/eval-runtime', { code: buildEvalJobStatusLuau(job, wait, from) },
+      target, instance_id, Math.ceil((wait + 15) * 1000));
+    return { content: [{ type: 'text', text: JSON.stringify(response) }] };
+  }
+
+  async evalServerRuntime(code: string, instance_id?: string, operation_id?: string, options: EvalJobOptions = {}) {
+    if (options.job !== undefined) return this._evalJobStatus(options, 'server', instance_id);
+    code = readLuauSource(code, options.file, 'eval_server_runtime');
     if (!code) {
       throw new Error('Code is required for eval_server_runtime');
     }
     const preludeError = await this._runEvalPrelude('server', 'server', instance_id);
-    const response = await this._callSingle('/api/eval-runtime', { code }, 'server', instance_id, undefined, undefined, operation_id);
+    const response = await this._callSingle('/api/eval-runtime', evalRequest(code, options), 'server', instance_id, undefined, undefined, operation_id);
     return {
       content: [
         {
@@ -2562,17 +2578,19 @@ export class RobloxStudioTools {
     };
   }
 
-  async evalClientRuntime(code: string, target?: string, instance_id?: string, operation_id?: string) {
-    if (!code) {
-      throw new Error('Code is required for eval_client_runtime');
-    }
+  async evalClientRuntime(code: string, target?: string, instance_id?: string, operation_id?: string, options: EvalJobOptions = {}) {
     if (target && !target.startsWith('client-')) {
       throw new Error(`eval_client_runtime requires target=client-N (got: ${target})`);
     }
     const clientChoice: TargetChoice = { requested: target, fallback: 'client-1', accepts: isClientRole };
+    if (options.job !== undefined) return this._evalJobStatus(options, clientChoice, instance_id);
+    code = readLuauSource(code, options.file, 'eval_client_runtime');
+    if (!code) {
+      throw new Error('Code is required for eval_client_runtime');
+    }
     const preludeError = await this._runEvalPrelude('client', clientChoice, instance_id);
     const response = await this._callSingle(
-      '/api/eval-runtime', { code }, clientChoice,
+      '/api/eval-runtime', evalRequest(code, options), clientChoice,
       instance_id, undefined, undefined, operation_id,
     );
     return {
@@ -6682,6 +6700,96 @@ export function filterLessons(text: string, domain: string): { count: number; te
 // `.client.luau` in the directory the MCP client launched the server from, which for Claude Code is
 // the project. Read at call time; a missing, non-file or oversized (over 64 KB) one is no prelude.
 const EVAL_PRELUDE_BYTES = 64 * 1024;
+
+// Luau from a file (this fork): `file` is read on the server, relative to the directory the client
+// launched it in (the project, for Claude Code), so a test script is not pasted into every call.
+// Only .luau/.lua files under 256 KB; the source runs as if passed as `code`, line numbers intact.
+const LUAU_FILE_BYTES = 256 * 1024;
+
+export function readLuauSource(code: string | undefined, file: string | undefined, tool: string, cwd: string = process.cwd()): string {
+  if (file === undefined || file === '') return code ?? '';
+  if (code) throw new Error(`${tool} takes code or file, not both`);
+  const resolved = path.resolve(cwd, file);
+  if (!/\.(luau|lua)$/i.test(resolved)) throw new Error(`${tool} file must be a .luau or .lua file (got ${resolved})`);
+  let stat: fs.Stats;
+  try {
+    stat = fs.statSync(resolved);
+  } catch {
+    throw new Error(`${tool} file not found: ${resolved}`);
+  }
+  if (!stat.isFile()) throw new Error(`${tool} file is not a regular file: ${resolved}`);
+  if (stat.size > LUAU_FILE_BYTES) throw new Error(`${tool} file is ${stat.size} bytes; the limit is ${LUAU_FILE_BYTES}`);
+  return fs.readFileSync(resolved, 'utf8');
+}
+
+export interface EvalJobOptions {
+  file?: string;
+  background?: boolean;
+  job?: string;
+  wait?: number;
+  output_from?: number;
+}
+
+const EVAL_JOB_MAX_WAIT_S = 25;
+const EVAL_JOB_MAX_OUTPUT = 500;
+let evalJobCounter = 0;
+
+function evalRequest(code: string, options: EvalJobOptions): Record<string, unknown> {
+  if (!options.background) return { code };
+  const job = `job${++evalJobCounter}${Math.random().toString(36).slice(2, 6)}`;
+  // keepPayload: the plugin must not destroy the payload module while the job runs; the job
+  // destroys it when it ends.
+  return { code: buildEvalJobLuau(code, job), keepPayload: true };
+}
+
+// A background eval (this fork): the code runs in its own thread of the runtime VM and the eval
+// returns at once with the job's id; prints, the value and any error are kept in _G.__mcp_jobs
+// for the status call. Everything before the caller's code is on its first line, so its line
+// numbers are the caller's; error lines are shifted back by the wrapper's own offset.
+export function buildEvalJobLuau(code: string, job: string): string {
+  const prefix = [
+    `local __mcp_job_id = ${JSON.stringify(job)}`,
+    '_G.__mcp_jobs = _G.__mcp_jobs or {}',
+    'local __mcp_job = { state = "running", started = os.clock(), output = {} }',
+    '_G.__mcp_jobs[__mcp_job_id] = __mcp_job',
+    'local __mcp_job_line = debug.info(1, "l") - 1',
+    'local __mcp_job_script = script',
+    `local function __mcp_job_out(prefix, ...) local parts = {} for i = 1, select("#", ...) do parts[i] = tostring((select(i, ...))) end if #__mcp_job.output < ${EVAL_JOB_MAX_OUTPUT} then table.insert(__mcp_job.output, prefix .. table.concat(parts, "\\t")) end end`,
+    'local __mcp_job_print, __mcp_job_warn = print, warn',
+    'task.spawn(function()',
+    'local print = function(...) __mcp_job_print(...) __mcp_job_out("", ...) end',
+    'local warn = function(...) __mcp_job_warn(...) __mcp_job_out("[warn] ", ...) end',
+    'local __mcp_ok, __mcp_value = xpcall(function() ',
+  ].join(' ');
+  const suffix = [
+    '',
+    'end, function(err)',
+    '  local msg = tostring(err):gsub(":(%d+):", function(n) return ":" .. (tonumber(n) - __mcp_job_line) .. ":" end)',
+    '  return msg',
+    'end)',
+    'if __mcp_ok then __mcp_job.state = "done"; __mcp_job.value = __mcp_value',
+    'else __mcp_job.state = "error"; __mcp_job.error = __mcp_value end',
+    '__mcp_job.finished = os.clock()',
+    'pcall(function() __mcp_job_script:Destroy() end)',
+    'end)',
+    'return { job = __mcp_job_id, state = __mcp_job.state }',
+  ].join('\n');
+  return prefix + code + suffix;
+}
+
+export function buildEvalJobStatusLuau(job: string, waitS: number, outputFrom: number): string {
+  return [
+    `local job = _G.__mcp_jobs and _G.__mcp_jobs[${JSON.stringify(job)}]`,
+    'if not job then error("no job ' + job + ' in this VM (finished jobs are forgotten once read; a new playtest starts empty)") end',
+    `local deadline = os.clock() + ${waitS}`,
+    'while job.state == "running" and os.clock() < deadline do task.wait(0.1) end',
+    'local out = {}',
+    `for i = ${outputFrom} + 1, #job.output do out[#out + 1] = job.output[i] end`,
+    `if job.state ~= "running" then _G.__mcp_jobs[${JSON.stringify(job)}] = nil end`,
+    'return { state = job.state, value = job.value, error = job.error, output = out, output_next = #job.output,',
+    '  seconds = math.floor(((job.finished or os.clock()) - job.started) * 100) / 100 }',
+  ].join('\n');
+}
 
 export function readEvalPrelude(side: 'server' | 'client', cwd: string = process.cwd()): string | undefined {
   const file = path.join(cwd, '.robloxstudio', `eval-prelude.${side}.luau`);
