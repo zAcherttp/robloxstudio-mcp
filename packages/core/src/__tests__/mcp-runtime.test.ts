@@ -295,13 +295,15 @@ describe('MCP v2 tool runtime', () => {
     // Upstream: 50 tools; 51,000 admits operation_id on every recoverable Studio write and
     // expected_revision(s) on script writes (about 1,600 characters). This fork adds
     // capture_heap_snapshot, check_rojo, simulate_input_sequence and get_project_lessons
-    // (about 3,000 characters with simulate_mouse_input's delta, pan and pinch).
+    // (about 3,000 characters with simulate_mouse_input's delta, pan and pinch), and the compact
+    // replies' verbose, ms, exact, exclude, next_cursor and full_size flags (about 850).
     expect(catalog).toHaveLength(54);
-    expect(serialized.length).toBeLessThanOrEqual(54_500);
+    expect(serialized.length).toBeLessThanOrEqual(55_000);
     expect(catalog.filter((tool) => tool.outputSchema)).toHaveLength(53);
     expect(catalog.every((tool) => tool.description.length <= 120)).toBe(true);
     expect(inspectorCatalog).toHaveLength(25);
-    expect(JSON.stringify(inspectorCatalog).length).toBeLessThanOrEqual(21_000);
+    // 21,500 (this fork): get_runtime_logs' and capture_screenshot's compact-reply flags.
+    expect(JSON.stringify(inspectorCatalog).length).toBeLessThanOrEqual(21_500);
     expect(byName.get('selection')?.outputSchema).toEqual({
       type: 'object',
       additionalProperties: true,

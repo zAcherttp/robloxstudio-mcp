@@ -634,6 +634,10 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
         launch_id: {
           type: 'string',
           description: 'Launch for close or status; excludes instance_id.'
+        },
+        verbose: {
+          type: 'boolean',
+          description: 'Full process record for launch and close.'
         }
       },
       required: ['action']
@@ -673,10 +677,15 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
   {
     name: 'set_network_profile',
     category: 'write',
-    description: 'Use to simulate client latency, jitter, or packet loss.',
+    description: 'Use to simulate client latency, jitter, or packet loss; set before Play, it applies as clients join.',
     inputSchema: {
       type: 'object',
       properties: {
+        ms: {
+          type: 'number',
+          minimum: 0,
+          description: 'Round trip ms, split both ways, no jitter or loss; replaces profile.'
+        },
         profile: {
           type: 'string',
           enum: ['great', 'good', 'poor', 'custom'],
@@ -725,12 +734,15 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
           },
           description: 'NetworkSettings fields that override or define the profile.'
         },
+        verbose: {
+          type: 'boolean',
+          description: 'Full per-client JSON.'
+        },
         instance_id: {
           type: 'string',
           description: 'Studio process ID when ambiguous.'
         }
       },
-      required: ['profile']
     }
   },
   {
@@ -1016,6 +1028,23 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
         filter: {
           type: 'string',
           description: 'Literal message substring applied before tail.'
+        },
+        exact: {
+          type: 'boolean',
+          description: 'filter must equal the whole message.'
+        },
+        exclude: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Drop messages containing any of these.'
+        },
+        next_cursor: {
+          type: 'boolean',
+          description: 'Return a cursor for the next read.'
+        },
+        verbose: {
+          type: 'boolean',
+          description: 'Raw entries with timestamps, noise and cursor.'
         }
       }
     }
@@ -1648,6 +1677,14 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
         quality: {
           type: 'number',
           description: 'JPEG quality 1-100; defaults to 92. Ignored for png.'
+        },
+        full_size: {
+          type: 'boolean',
+          description: 'Every viewport pixel; default is half size.'
+        },
+        verbose: {
+          type: 'boolean',
+          description: 'Format, source and input-coordinate notes.'
         },
         instance_id: {
           type: 'string',

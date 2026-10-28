@@ -91,6 +91,20 @@ is a conflict waiting at the next merge. What this fork carries on top of upstre
   as `prelude_error` beside the caller's result. Written after a session that rebuilt the same
   command-bridge helper about fifteen times.
 
+- **Compact replies by default** (`packages/core/src/tools/index.ts`, `studio-log.ts`). Through the
+  tool handlers (`http-server.ts`), five tools answer with what an agent acts on and give the full
+  reply with `verbose: true`; called directly, the methods keep upstream's output, so upstream's
+  tests stand. `set_network_profile` takes `ms` (round trip, split both ways, no jitter or loss),
+  answers in one line, and before Play keeps the profile and applies it to each matching client as
+  it registers. `manage_instance` launch and close return the instance, pid and `auth` YES/NO,
+  read from that Studio's own log (the file `lsof` shows it holding, else the log begun after the
+  launch that names the place). `get_runtime_logs` returns lines (`W:`/`E:` before warnings and
+  errors), drops INFO entries and plugin chatter (Eclipse, Storage), takes `exact` and `exclude`,
+  and returns a cursor only with `next_cursor` or when paging. `capture_screenshot` sends a half-size
+  image (`full_size` for all of it) and only its size. Measured on typical calls: network 597 to 67
+  characters, launch 676 to 88, a 20-line log read 1,616 to 313, a 1812x1306 screenshot about 2,400
+  to 800 image tokens.
+
 - **A registry of running servers** (`packages/core/src/server-registry.ts`, `scripts/servers.mjs`,
   `npm run servers`). Every MCP client session starts its own server (Claude Code: one per
   session, in every project when configured at user level), and each keeps the code it started

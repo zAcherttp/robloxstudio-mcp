@@ -96,6 +96,8 @@ describe('runtime log responsiveness', () => {
         ...(groupId ? { multiplayer_group_id: groupId } : { instance_id: 'instance:test' }),
         tail: 10,
         filter: 'needle',
+        // The raw envelope with cursors (this fork's default reply is compact).
+        verbose: true,
         ...body,
       }, signal ? { signal } : undefined),
     );

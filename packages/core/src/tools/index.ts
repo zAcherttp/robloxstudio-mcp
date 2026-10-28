@@ -2,6 +2,7 @@ import { readRbxmInput } from '../rbxm-input.js';
 import { StudioHttpClient } from './studio-client.js';
 import { BridgeService, isValidOperationId, MAX_OPERATION_ID_LENGTH, MAX_OPERATION_WAIT_MS, RequestFailure, RoutingFailure, StudioOperationError } from '../bridge-service.js';
 import type { PublicStudioPeer, RequestStatus, StudioPeer } from '../bridge-service.js';
+import { studioAuthForProcess } from '../studio-log.js';
 import {
   openCloudAssetUploadLimitBytes,
   OpenCloudClient,
@@ -349,6 +350,44 @@ function encodeImageFromRgbaResponse(
   return {
     buffer: rgbaToJpeg(rgbaBuffer, response.width, response.height, quality),
     mimeType: 'image/jpeg',
+  };
+}
+
+// Box-filter downscale of an RGBA capture by a whole factor (this fork): capture_screenshot sends
+// half size by default, since an image's token cost follows its pixels and a full Retina viewport
+// is rarely needed to see what happened. Mouse coordinates stay right: the input scale is taken
+// from the image actually returned.
+function downscaleRgbaResponse(response: RawImageCaptureResponse, factor: number): RawImageCaptureResponse {
+  if (factor <= 1 || !response.data || response.width === undefined || response.height === undefined) return response;
+  const w = response.width;
+  const h = response.height;
+  const ow = Math.floor(w / factor);
+  const oh = Math.floor(h / factor);
+  if (ow < 1 || oh < 1) return response;
+  const src = Buffer.from(response.data, 'base64');
+  const out = Buffer.alloc(ow * oh * 4);
+  const area = factor * factor;
+  for (let y = 0; y < oh; y++) {
+    for (let x = 0; x < ow; x++) {
+      let r = 0, g = 0, b = 0, a = 0;
+      for (let dy = 0; dy < factor; dy++) {
+        let i = ((y * factor + dy) * w + x * factor) * 4;
+        for (let dx = 0; dx < factor; dx++, i += 4) {
+          r += src[i]; g += src[i + 1]; b += src[i + 2]; a += src[i + 3];
+        }
+      }
+      const o = (y * ow + x) * 4;
+      out[o] = r / area; out[o + 1] = g / area; out[o + 2] = b / area; out[o + 3] = a / area;
+    }
+  }
+  return {
+    ...response,
+    width: ow,
+    height: oh,
+    // The viewport is still the size input lands in.
+    viewportWidth: response.viewportWidth ?? response.nativeWidth ?? w,
+    viewportHeight: response.viewportHeight ?? response.nativeHeight ?? h,
+    data: out.toString('base64'),
   };
 }
 
@@ -865,6 +904,58 @@ const SIMULATION_PERSISTENCE_NOTES = [
   'StudioTestService client device simulator state may appear stale on fresh clients, so reset after client startup is required.',
 ];
 
+// `ms` (this fork) is a round trip split evenly between the two directions, with no jitter or
+// loss: the one number a test usually means by "set the ping".
+function networkValuesForMs(ms: unknown): NetworkProfileValues {
+  if (typeof ms !== 'number' || !Number.isFinite(ms) || ms < 0) {
+    throw new Error('ms must be a finite number greater than or equal to 0');
+  }
+  return {
+    ...ZERO_NETWORK_PROFILE,
+    InboundNetworkMinDelayMs: ms / 2,
+    OutboundNetworkMinDelayMs: ms / 2,
+  };
+}
+
+// One line per client for the compact reply: round trip, then jitter and loss in/out.
+function describeNetworkValues(values: NetworkProfileValues): string {
+  const v = (key: NetworkProfileKey) => values[key] ?? 0;
+  return `rtt ${v('InboundNetworkMinDelayMs') + v('OutboundNetworkMinDelayMs')} ms `
+    + `(in ${v('InboundNetworkMinDelayMs')}/out ${v('OutboundNetworkMinDelayMs')}), `
+    + `jitter ${v('InboundNetworkJitterMs')}/${v('OutboundNetworkJitterMs')} ms, `
+    + `loss ${v('InboundNetworkLossPercent')}/${v('OutboundNetworkLossPercent')}%`;
+}
+
+interface RuntimeLogOptions {
+  verbose?: boolean;
+  exact?: boolean;
+  exclude?: string[];
+  next_cursor?: boolean;
+}
+
+// Output that is never the game's (this fork): Studio's own INFO chatter and plugins that print
+// on every load, which buried the lines a test was looking for.
+const RUNTIME_LOG_NOISE_PREFIXES = ['Eclipse', '[Eclipse', 'Storage:', '[Storage'];
+
+// Compact log lines (this fork): "message" for output, "W: " / "E: " before warnings and errors;
+// no timestamps or context tables. Noise and caller exclusions are dropped; `exact` keeps only
+// messages equal to it.
+function compactRuntimeLogEntries(entries: unknown[], options: { exact?: string; exclude?: string[] }): string[] {
+  const lines: string[] = [];
+  for (const entry of entries) {
+    if (typeof entry !== 'object' || entry === null) continue;
+    const record = entry as { level?: unknown; message?: unknown };
+    if (typeof record.message !== 'string') continue;
+    const message = record.message;
+    if (record.level === 'INFO') continue;
+    if (RUNTIME_LOG_NOISE_PREFIXES.some((prefix) => message.startsWith(prefix))) continue;
+    if (options.exact !== undefined && message.trim() !== options.exact) continue;
+    if (options.exclude?.some((needle) => message.includes(needle))) continue;
+    lines.push(record.level === 'WARN' ? `W: ${message}` : record.level === 'ERR' ? `E: ${message}` : message);
+  }
+  return lines;
+}
+
 function normalizeNetworkProfile(profile: string, overrides?: Record<string, unknown>): NetworkProfileValues {
   if (!['great', 'good', 'poor', 'custom'].includes(profile)) {
     throw new Error('profile must be "great", "good", "poor", or "custom"');
@@ -1251,6 +1342,9 @@ export class RobloxStudioTools {
   private readonly referenceUploads = new ReferenceUploads();
   // Paces chunks of a client capture copied through the client broker.
   private captureChunkPace: PaceCaptureChunk = idleAsLongAsRead;
+  // set_network_profile calls made before Play, by instance (this fork): applied to clients as they
+  // join. A client-N profile is applied once; an all-clients one to every client until replaced.
+  private readonly _pendingNetworkProfiles = new Map<string, { target: string; profile: string; values: NetworkProfileValues }>();
 
   constructor(bridge: BridgeService) {
     this.client = new StudioHttpClient(bridge);
@@ -1259,6 +1353,7 @@ export class RobloxStudioTools {
     this.cookieClient = new RobloxCookieClient();
     this.instanceManager = new StudioInstanceManager();
     this.unsubscribePeerRegistered = this.bridge.onPeerRegistered((peer) => {
+      this._applyPendingNetworkProfile(peer);
       const instanceManager = this.instanceManager;
       const association = this.managedConnectionAssociations.then(() =>
         this._associateManagedEditConnection(peer, instanceManager),
@@ -2490,13 +2585,35 @@ export class RobloxStudioTools {
     };
   }
 
-  async setNetworkProfile(profile: string, target?: string, overrides?: Record<string, unknown>, instance_id?: string) {
-    const values = normalizeNetworkProfile(profile, overrides);
+  async setNetworkProfile(
+    profile: string | undefined,
+    target?: string,
+    overrides?: Record<string, unknown>,
+    instance_id?: string,
+    options: { ms?: number; verbose?: boolean } = {},
+  ) {
+    const selectedProfile = profile ?? (options.ms !== undefined ? 'custom' : undefined);
+    if (selectedProfile === undefined) throw new Error('set_network_profile requires profile or ms');
+    const values = options.ms !== undefined
+      ? { ...networkValuesForMs(options.ms), ...(overrides ? normalizeNetworkProfile('custom', overrides) : {}) }
+      : normalizeNetworkProfile(selectedProfile, overrides);
     const refresh = this.bridge.refreshTopologyForRouting();
     if (refresh) await refresh;
     const instanceId = this._resolveInstanceIdOnly(instance_id);
     const clientRoles = this._clientRolesForScope(instanceId);
     const selectedTarget = this._targetForInstanceId(instance_id, { requested: target, fallback: 'client-1', accepts: isClientRole });
+
+    // Before Play there is no client to set (this fork): keep the profile and apply it to each
+    // matching client as it joins, rather than failing and making the caller come back after Play.
+    if ((selectedTarget === 'all-clients' || /^client-\d+$/.test(selectedTarget)) && clientRoles.length === 0) {
+      this._pendingNetworkProfiles.set(instanceId, { target: selectedTarget, profile: selectedProfile, values });
+      const line = `pending for ${selectedTarget === 'all-clients' ? 'each client' : selectedTarget} when it joins: ${describeNetworkValues(values)}`;
+      return this._textResult(options.verbose === false
+        ? { set: line }
+        : { profile: selectedProfile, target: selectedTarget, applied: values, pending: true, set: line });
+    }
+    // A profile set now replaces one kept for later.
+    this._pendingNetworkProfiles.delete(instanceId);
 
     let targetRoles: string[];
     if (selectedTarget === 'all-clients') {
@@ -2522,7 +2639,7 @@ export class RobloxStudioTools {
       });
     }
 
-    const code = buildNetworkProfileLuau(profile, values);
+    const code = buildNetworkProfileLuau(selectedProfile, values);
     const responses = await Promise.allSettled(
       targetRoles.map(async (role) => {
         const response = await this._request('/api/execute-luau', { code }, instanceId, role);
@@ -2532,7 +2649,7 @@ export class RobloxStudioTools {
     );
 
     const body: Record<string, unknown> = {
-      profile,
+      profile: selectedProfile,
       target: selectedTarget,
       applied: values,
       targets: {},
@@ -2555,6 +2672,9 @@ export class RobloxStudioTools {
       throw new Error(`set_network_profile failed for ${failures.join('; ')}. Partial result: ${JSON.stringify(body)}`);
     }
 
+    if (options.verbose === false) {
+      return this._textResult({ set: `${targetRoles.join(', ')}: ${describeNetworkValues(values)}` });
+    }
     return {
       content: [
         {
@@ -2563,6 +2683,21 @@ export class RobloxStudioTools {
         },
       ],
     };
+  }
+
+  // Applies a kept profile to a client that has just joined. Failures are logged; the next
+  // set_network_profile or get_simulation_state shows what the client really has.
+  private _applyPendingNetworkProfile(peer: PublicStudioPeer): void {
+    if (!/^client-\d+$/.test(peer.role)) return;
+    for (const [instanceId, pending] of this._pendingNetworkProfiles) {
+      if (pending.target !== 'all-clients' && pending.target !== peer.role) continue;
+      if (!this.bridge.getPeersInScope(instanceId).some((candidate) => candidate.peerId === peer.peerId)) continue;
+      if (pending.target !== 'all-clients') this._pendingNetworkProfiles.delete(instanceId);
+      const code = buildNetworkProfileLuau(pending.profile, pending.values);
+      this._request('/api/execute-luau', { code }, instanceId, peer.role)
+        .then((response) => this._parseExecuteLuauJsonResponse(response, 'set_network_profile'))
+        .catch((error) => console.warn(`[robloxstudio-mcp] pending network profile for ${peer.role} failed: ${errorMessage(error)}`));
+    }
   }
 
   async getSimulationState(include?: string, target?: string, instance_id?: string) {
@@ -2961,6 +3096,44 @@ export class RobloxStudioTools {
   }
 
   async getRuntimeLogs(
+    instance_id?: string,
+    multiplayer_group_id?: string,
+    cursor?: string,
+    cursor_by_instance?: Record<string, string>,
+    tail?: number,
+    filter?: string,
+    signal?: AbortSignal,
+    options: RuntimeLogOptions = {},
+  ) {
+    const result = await this._getRuntimeLogsFull(instance_id, multiplayer_group_id, cursor, cursor_by_instance,
+      options.verbose !== false ? tail : undefined, filter, signal);
+    if (options.verbose !== false) return result;
+    const body = this._parseTextResult(result);
+    const wantCursor = options.next_cursor === true || cursor !== undefined || cursor_by_instance !== undefined;
+    const compactInstance = (instance: Record<string, unknown>): Record<string, unknown> => {
+      const out: Record<string, unknown> = {};
+      if (body.instances !== undefined) out.instanceId = instance.instanceId;
+      if (Array.isArray(instance.entries)) {
+        const lines = compactRuntimeLogEntries(instance.entries, { exact: options.exact ? filter : undefined, exclude: options.exclude });
+        out.entries = tail === undefined ? lines : tail === 0 ? [] : lines.slice(-tail);
+      }
+      if (typeof instance.totalDropped === 'number' && instance.totalDropped > 0) out.dropped = instance.totalDropped;
+      if (instance.error !== undefined) out.error = instance.error;
+      if (instance.peerErrors !== undefined) out.peerErrors = instance.peerErrors;
+      if (wantCursor && body.instances === undefined) out.nextCursor = instance.nextCursor;
+      return out;
+    };
+    if (Array.isArray(body.instances)) {
+      return this._textResult({
+        multiplayerGroupId: body.multiplayerGroupId,
+        instances: body.instances.map((instance) => compactInstance(instance as Record<string, unknown>)),
+        ...(wantCursor ? { nextCursorByInstance: body.nextCursorByInstance } : {}),
+      });
+    }
+    return this._textResult(compactInstance(body));
+  }
+
+  private async _getRuntimeLogsFull(
     instance_id?: string,
     multiplayer_group_id?: string,
     cursor?: string,
@@ -3889,7 +4062,30 @@ export class RobloxStudioTools {
     return match ? Number(match[1]) : undefined;
   }
 
+  // launch and close answer with what a caller acts on (this fork): the instance, its pid and
+  // whether Studio is signed in, read from that process's log. verbose returns the full record.
   async manageInstance(request: Record<string, unknown>) {
+    const result = await this._manageInstanceFull(request);
+    if (request.verbose !== false || (request.action !== 'launch' && request.action !== 'close')) return result;
+    const body = this._parseTextResult(result);
+    const compact: Record<string, unknown> = {};
+    if (body.instance_id !== undefined) compact.instance_id = body.instance_id;
+    else if (body.launch_id !== undefined) compact.launch_id = body.launch_id;
+    if (body.pid !== undefined) compact.pid = body.pid;
+    if (request.action === 'launch' && body.error === undefined) {
+      compact.auth = studioAuthForProcess({
+        pid: typeof body.pid === 'number' ? body.pid : undefined,
+        launchedAt: typeof body.launched_at === 'string' ? Date.parse(body.launched_at) : undefined,
+        placeFile: typeof body.local_place_file === 'string' ? body.local_place_file : undefined,
+      }) ?? 'unknown';
+    }
+    if (body.close_status !== undefined) compact.close_status = body.close_status;
+    if (body.error !== undefined) compact.error = body.error;
+    if (body.message !== undefined && Object.keys(compact).length === 0) compact.message = body.message;
+    return this._textResult(compact);
+  }
+
+  private async _manageInstanceFull(request: Record<string, unknown>) {
     const action = request.action;
     const instance_id = typeof request.instance_id === 'string' ? request.instance_id : undefined;
     const launch_id = typeof request.launch_id === 'string' ? request.launch_id : undefined;
@@ -5977,9 +6173,10 @@ export class RobloxStudioTools {
     format?: string,
     quality?: number,
     maxBytes: number = MAX_INLINE_IMAGE_BYTES,
+    downscale = 1,
   ): Promise<EncodedViewportCapture> {
     const previous = this.viewportCaptureQueues.get(instanceId) ?? Promise.resolve();
-    const capture = previous.then(() => this._captureViewportImageNow(instanceId, targetRole, format, quality, maxBytes));
+    const capture = previous.then(() => this._captureViewportImageNow(instanceId, targetRole, format, quality, maxBytes, downscale));
     const settled = capture.then(() => undefined, () => undefined);
     this.viewportCaptureQueues.set(instanceId, settled);
     try {
@@ -5995,6 +6192,7 @@ export class RobloxStudioTools {
     format?: string,
     quality?: number,
     maxBytes: number = MAX_INLINE_IMAGE_BYTES,
+    downscale = 1,
   ): Promise<EncodedViewportCapture> {
     const fmt: 'jpeg' | 'png' = format === 'png' ? 'png' : 'jpeg';
     const q = quality === undefined ? 92 : Math.max(1, Math.min(100, Math.floor(quality)));
@@ -6013,7 +6211,7 @@ export class RobloxStudioTools {
     // rendering peer: 'edit' when idle, 'client-N' during a playtest.
     let response = await this._callSingle(
       '/api/capture-studio',
-      { encoding: fmt === 'png' ? 'png' : 'rgba8' },
+      { encoding: fmt === 'png' && downscale <= 1 ? 'png' : 'rgba8' },
       targetRole,
       instanceId,
     ) as RawImageCaptureResponse;
@@ -6100,6 +6298,7 @@ export class RobloxStudioTools {
       return { success: false, error: text, studioFastPathUnavailable };
     }
 
+    if (response.encoding !== 'png') response = downscaleRgbaResponse(response, downscale);
     const w = response.width;
     const h = response.height;
     if (w === undefined || h === undefined) {
@@ -6380,12 +6579,13 @@ export class RobloxStudioTools {
     };
   }
 
-  async captureScreenshot(instance_id?: string, format?: string, quality?: number) {
+  async captureScreenshot(instance_id?: string, format?: string, quality?: number, options: { full_size?: boolean; verbose?: boolean } = {}) {
     const refresh = this.bridge.refreshTopologyForRouting();
     if (refresh) await refresh;
     const { instanceId, clientRole } = this._resolveRuntime(instance_id);
     const role = clientRole ?? 'edit';
-    const capture = await this._captureViewportImage(instanceId, role, format, quality);
+    const capture = await this._captureViewportImage(instanceId, role, format, quality, undefined,
+      options.verbose === false && !options.full_size ? 2 : 1);
     if (!capture.success) {
       return this._textResult({ error: capture.error, studioFastPathUnavailable: capture.studioFastPathUnavailable });
     }
@@ -6399,6 +6599,22 @@ export class RobloxStudioTools {
         ? ` (the server multiplies x by ${scale.x.toFixed(4)} and y by ${scale.y.toFixed(4)} to reach viewport pixels).`
         : '.');
 
+    if (options.verbose === false) {
+      // Compact (this fork): the size, and the viewport when input coordinates are scaled.
+      return {
+        content: [
+          {
+            type: 'text',
+            text: JSON.stringify({
+              width: capture.width,
+              height: capture.height,
+              ...(this.screenshotInputScales.has(key) ? { viewport: `${capture.viewportWidth}x${capture.viewportHeight}` } : {}),
+            }),
+          },
+          { type: 'image', data: capture.data, mimeType: capture.mimeType },
+        ],
+      };
+    }
     return {
       content: [
         {
