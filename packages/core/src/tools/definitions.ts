@@ -422,6 +422,10 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
       type: 'object',
       properties: {
         operation_id: OPERATION_ID_PROPERTY,
+        file: {
+          type: 'string',
+          description: '.luau file to run instead of code; relative to the project.'
+        },
         code: {
           type: 'string',
           description: 'Luau code to execute.'
@@ -434,8 +438,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
           type: 'string',
           description: 'Studio process ID when ambiguous.'
         }
-      },
-      required: ['code']
+      }
     }
   },
   {
@@ -446,6 +449,26 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
       type: 'object',
       properties: {
         operation_id: OPERATION_ID_PROPERTY,
+        file: {
+          type: 'string',
+          description: '.luau file to run instead of code; relative to the project.'
+        },
+        background: {
+          type: 'boolean',
+          description: 'Run in its own thread and return a job id at once.'
+        },
+        job: {
+          type: 'string',
+          description: 'Job id: return its state, value, error and output.'
+        },
+        wait: {
+          type: 'number',
+          description: 'With job: seconds to wait for it to finish, up to 25.'
+        },
+        output_from: {
+          type: 'number',
+          description: 'With job: skip output lines already read (output_next).'
+        },
         code: {
           type: 'string',
           description: 'Luau code; return a value to include it in the result.'
@@ -454,8 +477,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
           type: 'string',
           description: 'Studio process ID when ambiguous.'
         }
-      },
-      required: ['code']
+      }
     }
   },
   {
@@ -466,6 +488,26 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
       type: 'object',
       properties: {
         operation_id: OPERATION_ID_PROPERTY,
+        file: {
+          type: 'string',
+          description: '.luau file to run instead of code; relative to the project.'
+        },
+        background: {
+          type: 'boolean',
+          description: 'Run in its own thread and return a job id at once.'
+        },
+        job: {
+          type: 'string',
+          description: 'Job id: return its state, value, error and output.'
+        },
+        wait: {
+          type: 'number',
+          description: 'With job: seconds to wait for it to finish, up to 25.'
+        },
+        output_from: {
+          type: 'number',
+          description: 'With job: skip output lines already read (output_next).'
+        },
         code: {
           type: 'string',
           description: 'Luau code; return a value to include it in the result.'
@@ -478,8 +520,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
           type: 'string',
           description: 'Studio process ID when ambiguous.'
         }
-      },
-      required: ['code']
+      }
     }
   },
 
@@ -742,7 +783,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
           type: 'string',
           description: 'Studio process ID when ambiguous.'
         }
-      },
+      }
     }
   },
   {

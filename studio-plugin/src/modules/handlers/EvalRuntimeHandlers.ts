@@ -97,7 +97,10 @@ function evalRuntime(requestData: Record<string, unknown>) {
 	m.Parent = game.GetService("Workspace");
 	const historyStart = LogService.GetLogHistory().size();
 	const [invokeOk, invokeResult] = pcall(() => bridge.Invoke(m) as BridgeInvokeResult);
-	m.Destroy();
+	// A background job (this fork) keeps running in a thread its payload started, so the payload is
+	// only unparented here; the job destroys it when it ends.
+	if (invokeOk && requestData.keepPayload === true) m.Parent = undefined;
+	else m.Destroy();
 
 	if (!invokeOk) {
 		return {

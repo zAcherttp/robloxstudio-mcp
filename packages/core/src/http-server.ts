@@ -226,6 +226,17 @@ function scriptEditsFromBody(body: Record<string, unknown>): ScriptEdit[] {
   });
 }
 
+// eval_*_runtime's file and background-job arguments (this fork).
+function evalJobOptions(body: Record<string, unknown>) {
+  return {
+    file: typeof body.file === 'string' ? body.file : undefined,
+    background: body.background === true,
+    job: typeof body.job === 'string' ? body.job : undefined,
+    wait: typeof body.wait === 'number' ? body.wait : undefined,
+    output_from: typeof body.output_from === 'number' ? body.output_from : undefined,
+  };
+}
+
 export const TOOL_HANDLERS: Record<string, ToolHandler> = {
   get_request_status: (tools, body, context) => tools.getRequestStatus(body.request_id, body.wait_ms, context?.signal),
   get_roblox_skills: (tools, body) => tools.getRobloxSkills(body.action, body.name),
@@ -273,9 +284,9 @@ export const TOOL_HANDLERS: Record<string, ToolHandler> = {
   },
   get_attributes: (tools, body) => tools.getAttributes(body.instancePath, body.instance_id),
   selection: (tools, body) => tools.selection(body.action, body, body.instance_id),
-  execute_luau: (tools, body) => tools.executeLuau(body.code, body.target, body.instance_id, body.operation_id),
-  eval_server_runtime: (tools, body) => tools.evalServerRuntime(body.code, body.instance_id, body.operation_id),
-  eval_client_runtime: (tools, body) => tools.evalClientRuntime(body.code, body.target, body.instance_id, body.operation_id),
+  execute_luau: (tools, body) => tools.executeLuau(body.code, body.target, body.instance_id, body.operation_id, { file: body.file }),
+  eval_server_runtime: (tools, body) => tools.evalServerRuntime(body.code, body.instance_id, body.operation_id, evalJobOptions(body)),
+  eval_client_runtime: (tools, body) => tools.evalClientRuntime(body.code, body.target, body.instance_id, body.operation_id, evalJobOptions(body)),
   set_network_profile: (tools, body) => tools.setNetworkProfile(body.profile, body.target, body.overrides, body.instance_id, { ms: body.ms, verbose: body.verbose === true }),
   get_simulation_state: (tools, body) => tools.getSimulationState(body.include, body.target, body.instance_id),
   reset_simulation_state: (tools, body) => tools.resetSimulationState(body.target, body.network, body.deviceSimulator, body.instance_id),
