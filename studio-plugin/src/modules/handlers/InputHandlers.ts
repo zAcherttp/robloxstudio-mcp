@@ -7,8 +7,10 @@
 // capability and drives the REAL input pipeline: SendKey feeds
 // UserInputService.InputBegan/Ended and the control modules (so WASD walks the
 // character at full WalkSpeed with controls intact, no Humanoid hijack),
-// SendMouseButton feeds UIS and activates GUI buttons (and hit-tests against
-// CoreGui), and SendTextInput types into the focused TextBox.
+// SendMouseButton feeds UIS and activates GUI buttons, SendMousePosition moves
+// the cursor (hover, MouseEnter, InputChanged), SendPointerAction scrolls
+// under a position, and SendTextInput types into the focused TextBox. Every method throws when the
+// input would hit interactive CoreGui.
 //
 // Method set on the VirtualInput object (re-verified live 2026-09-28; the
 // engine added the mouse and pointer ones after this handler was written):
@@ -20,6 +22,16 @@
 //   SendTextInput(text: string)
 // SendMouseDelta is the one a game reading GetMouseDelta sees: ten deltas of
 // -20 px with the cursor locked turned an aim by exactly what 200 real pixels do.
+//
+// Verified live on a play client: move and scroll reach game scripts with
+// the device simulator stopped. Under touch device emulation the client has
+// no mouse: clicks arrive as Touch, scroll still works, but moves never reach
+// the game, so we reject move there instead of returning a false success.
+//
+// Upstream deliberately does not expose SendMouseDelta: it only works while the
+// cursor is locked (MouseBehavior.LockCenter), and on desktop Studio holds that
+// lock by pinning and hiding the user's real OS cursor. This fork exposes it
+// (action "delta") because aim tests need it; the lock is the game's, not ours.
 //
 // Coordinate space: VirtualInput takes Camera.ViewportSize pixels (origin at the top-left of the
 // rendered viewport, the top bar included). UserInputService reports input positions in GUI
@@ -100,7 +112,7 @@ function mouseAction(vi: VirtualInput, requestData: Record<string, unknown>) {
 	} else if (action === "delta") {
 		vi.SendMouseDelta(new Vector2(num(requestData.dx) ?? 0, num(requestData.dy) ?? 0));
 	} else if (action === "scroll") {
-		vi.SendPointerAction(pos, { Wheel: num(requestData.amount) ?? 1 });
+		vi.SendPointerAction(pos, { Wheel: num(requestData.wheel) ?? num(requestData.amount) ?? 1 });
 	} else if (action === "pan") {
 		vi.SendPointerAction(pos, { Pan: new Vector2(num(requestData.dx) ?? 0, num(requestData.dy) ?? 0) });
 	} else if (action === "pinch") {
@@ -110,6 +122,10 @@ function mouseAction(vi: VirtualInput, requestData: Record<string, unknown>) {
 	}
 }
 
+const NO_MOUSE_ERROR =
+	"This client has no mouse (touch device emulation is active), so cursor movement never reaches the game. " +
+	"Stop it with set_device_simulator stopSimulation=true, then retry.";
+
 function simulateMouseInput(requestData: Record<string, unknown>) {
 	const action = requestData.action as string;
 	if (!action) return { error: "action is required" };
@@ -118,6 +134,10 @@ function simulateMouseInput(requestData: Record<string, unknown>) {
 	// (e.g. minimized). Surface that instead of returning a false success.
 	const notRendering = RenderMonitor.notRenderingReason();
 	if (notRendering !== undefined) return { error: notRendering };
+
+	if (action === "move" && !UserInputService.MouseEnabled) {
+		return { error: NO_MOUSE_ERROR };
+	}
 
 	const vi = getVI();
 	if (!vi) {

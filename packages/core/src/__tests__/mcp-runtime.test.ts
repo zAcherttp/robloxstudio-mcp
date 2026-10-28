@@ -292,15 +292,16 @@ describe('MCP v2 tool runtime', () => {
     const serialized = JSON.stringify(catalog);
     const inspectorCatalog = getReadOnlyTools().map(publicToolDefinition);
 
-    // capture_heap_snapshot and check_rojo (this fork) added a tool each, about 850 and 450
-    // characters; simulate_input_sequence about 660, and simulate_mouse_input's move, delta and
-    // pointer actions about 300.
-    expect(catalog).toHaveLength(52);
-    expect(serialized.length).toBeLessThanOrEqual(46_500);
-    expect(catalog.filter((tool) => tool.outputSchema)).toHaveLength(51);
+    // Upstream: 50 tools; 51,000 admits operation_id on every recoverable Studio write and
+    // expected_revision(s) on script writes (about 1,600 characters). This fork adds
+    // capture_heap_snapshot, check_rojo, simulate_input_sequence and get_project_lessons
+    // (about 3,000 characters with simulate_mouse_input's delta, pan and pinch).
+    expect(catalog).toHaveLength(54);
+    expect(serialized.length).toBeLessThanOrEqual(54_500);
+    expect(catalog.filter((tool) => tool.outputSchema)).toHaveLength(53);
     expect(catalog.every((tool) => tool.description.length <= 120)).toBe(true);
     expect(inspectorCatalog).toHaveLength(25);
-    expect(JSON.stringify(inspectorCatalog).length).toBeLessThanOrEqual(20_000);
+    expect(JSON.stringify(inspectorCatalog).length).toBeLessThanOrEqual(21_000);
     expect(byName.get('selection')?.outputSchema).toEqual({
       type: 'object',
       additionalProperties: true,
@@ -365,6 +366,18 @@ describe('MCP v2 tool runtime', () => {
     expect(byName.get('upload_asset')?.annotations).toMatchObject({
       readOnlyHint: false,
       destructiveHint: false,
+      idempotentHint: false,
+      openWorldHint: true,
+    });
+    expect(byName.get('manage_monetization')?.annotations).toMatchObject({
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: false,
+      openWorldHint: true,
+    });
+    expect(byName.get('manage_experience')?.annotations).toMatchObject({
+      readOnlyHint: false,
+      destructiveHint: true,
       idempotentHint: false,
       openWorldHint: true,
     });
@@ -566,6 +579,32 @@ describe('MCP v2 tool runtime', () => {
       },
       'instance:test',
       controller.signal,
+    );
+  });
+
+  test('forwards scope and limit options through the search_objects adapter', async () => {
+    const searchObjects = jest.fn(async () => ({ content: [] }));
+    const tools = { searchObjects } as unknown as RobloxStudioTools;
+
+    await TOOL_HANDLERS.search_objects(tools, {
+      query: 'door',
+      searchType: 'name',
+      path: 'game.Workspace.Map',
+      className: 'BasePart',
+      maxResults: 25,
+      instance_id: 'instance:test',
+    });
+
+    expect(searchObjects).toHaveBeenCalledWith(
+      'door',
+      {
+        searchType: 'name',
+        propertyName: undefined,
+        path: 'game.Workspace.Map',
+        className: 'BasePart',
+        maxResults: 25,
+      },
+      'instance:test',
     );
   });
 

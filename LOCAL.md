@@ -200,6 +200,16 @@ Then reload the server as above and confirm the Studio tools still respond befor
 Adopted so far: v3.1.5 at the fork, then upstream through #101 on 2026-09-28 (property writes,
 auth-token races, the shared plugin installer, false repair waits). Upstream's final #98 matched
 the capture code merged earlier, less this fork's screencapture fallback, which stays.
+Then v3.4.2 on 2026-10-28 (30 commits: manage_monetization, manage_experience, Wine on Linux,
+script-edit revisions, MicroProfiler recording, client broker deadlines and heartbeats). Upstream's
+own mouse move and scroll (#131) met this fork's: the fork's handler stays (it also has delta,
+pan and pinch), scroll takes upstream's `wheel`, and upstream's no-mouse check under touch
+emulation is kept. Upstream says it leaves `SendMouseDelta` out on purpose, because Studio pins
+the real OS cursor while it is locked; the fork keeps it for aim tests. The catalog test is now
+54 tools and 54,500 characters, upstream's own growth being most of it. The broker fixes
+(bda9b7b, 3a380b0) bound and diagnose requests to a client that is already connected; they do
+not touch how `multiplayer_playtest start` detects its peers or what it leaves running when it
+fails, so `multiplayer_start_not_detected` and its orphan Studio processes are unchanged.
 
 ## Why this matters
 

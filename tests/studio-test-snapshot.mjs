@@ -169,9 +169,8 @@ try {
     assert.equal(existsSync(path.join(destinationParent, 'escaped.ts')), false);
     assert.deepEqual(readdirSync(destinationParent).sort(), existingWorkers);
     rmSync(path.join(sourceDirectory, '..\\escaped.ts'));
+    // Only a case-sensitive filesystem (Linux, not default macOS) can hold both names.
     put('Case/one.ts', 'one\n');
-    // A case-insensitive filesystem (macOS's default) cannot hold two paths that differ only in
-    // case, so there is no collision to build there.
     if (!existsSync(path.join(sourceDirectory, 'case', 'one.ts'))) {
       put('case/two.ts', 'two\n');
       await assert.rejects(prepareStudioTestSnapshot({ sourceDirectory, destinationParent }), /case-colliding/);

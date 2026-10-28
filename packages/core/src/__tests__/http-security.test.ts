@@ -41,6 +41,10 @@ describe('HTTP security', () => {
         endpoint: '/api/get-script-source', status: 200 },
       { label: 'simulation read', allowed: new Set(['get_simulation_state', 'get_device_simulator_state']),
         endpoint: '/api/execute-luau', status: 403 },
+      { label: 'monetization', allowed: new Set(['manage_monetization']),
+        endpoint: '/api/place-info', status: 200 },
+      { label: 'monetization only', allowed: new Set(['manage_monetization']),
+        endpoint: '/api/execute-luau', status: 403 },
     ])('enforces $label configuration', async ({ allowed, endpoint, status }) => {
       const app = createHttpServer(tools, bridge, allowed, undefined, { authToken: token });
       const dispatch = jest.spyOn(bridge, 'sendRequest').mockResolvedValue({ success: true });
@@ -79,7 +83,8 @@ describe('HTTP security', () => {
 
     it.each(['/api/place-info', '/api/instance-properties', '/api/get-script-source',
       '/api/get-selection', '/api/set-selection', '/api/focus-viewport',
-      '/api/capture-begin', '/api/capture-read', '/api/get-runtime-logs'])(
+      '/api/capture-begin', '/api/capture-read', '/api/get-runtime-logs',
+      '/api/get-network-simulation-state', '/api/get-device-simulator-state'])(
       'forwards permitted Inspector endpoint %s', async (endpoint) => {
         const app = createHttpServer(tools, bridge, new Set(getReadOnlyTools().map(tool => tool.name)),
           undefined, { authToken: token });
@@ -92,7 +97,7 @@ describe('HTTP security', () => {
           expect(response.status).toBe(200);
           expect(response.body).toEqual({ response: result });
           expect(dispatch).toHaveBeenCalledWith(endpoint, { instancePath: 'game.Workspace' },
-            'studio-peer', 1000, expect.any(AbortSignal), 'read-operation');
+            'studio-peer', 1000, expect.any(AbortSignal), 'read-operation', undefined);
         } finally {
           dispatch.mockRestore();
           await app.cleanup();
@@ -115,7 +120,7 @@ describe('HTTP security', () => {
         expect(response.status).toBe(200);
         expect(response.body).toEqual({ response: capture });
         expect(dispatch).toHaveBeenCalledWith('/api/capture-studio', { encoding: 'png' },
-          'studio-peer', 1000, expect.any(AbortSignal), 'capture-operation');
+          'studio-peer', 1000, expect.any(AbortSignal), 'capture-operation', undefined);
       } finally {
         dispatch.mockRestore();
         await app.cleanup();
