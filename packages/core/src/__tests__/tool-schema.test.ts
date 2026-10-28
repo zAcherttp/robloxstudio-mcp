@@ -79,10 +79,14 @@ describe('Tool schema compatibility', () => {
     expect(Object.keys(properties).sort()).toEqual([
       'cursor',
       'cursor_by_instance',
+      'exact',
+      'exclude',
       'filter',
       'instance_id',
       'multiplayer_group_id',
+      'next_cursor',
       'tail',
+      'verbose',
     ]);
     expect(properties).not.toHaveProperty('target');
     expect(properties.cursor_by_instance).toMatchObject({
@@ -397,6 +401,7 @@ describe('Tool schema compatibility', () => {
       'studio_executable',
       'studio_working_directory',
       'timeout_ms',
+      'verbose',
       'wait_for_connection',
     ].sort());
     expect(props.studio_executable).toMatchObject({ type: 'string' });
