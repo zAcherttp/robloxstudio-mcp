@@ -42,7 +42,7 @@ screenshots, memory reports, and profiler captures from each peer.
 
 ### Find performance problems
 
-- Record server or client CPU timings with `capture_script_profiler` and `capture_micro_profiler`.
+- Record server or client CPU timings with `capture_script_profiler` and `capture_micro_profiler`. MicroProfiler captures are saved for re-analysis, and `capture_micro_profiler` also analyzes `.gprx` dumps from Studio's MicroProfiler.
 - Break down memory use with `get_memory_breakdown` or attribute scene cost with `get_scene_analysis`.
 
 ### Work in edit mode
@@ -58,6 +58,14 @@ screenshots, memory reports, and profiler captures from each peer.
 - Find public assets with `search_assets`, then read the full catalog metadata with `get_asset_details`.
 - Check an asset's hierarchy, media metadata, and security scan with `preview_asset` before adding it to the place.
 - Add an asset with `insert_asset`. The tool removes scripts and package links, verifies the cleaned result, and then parents it in Studio.
+
+### Manage monetization
+
+- List, create, and update developer products and game passes with `manage_monetization`. New items stay off sale unless you ask, and a name that already exists is refused because Roblox cannot delete these items. Requires an Open Cloud API key; see [Configuration](docs/configuration.md#environment-variables).
+
+### Manage experience settings
+
+- Read and change the experience title, description, server size, devices, voice chat, private server price, and social links with `manage_experience`. Private server price changes need `confirm`, which the agent sets itself, so it is not a human approval step. It cannot make an experience public or private: Open Cloud ignores visibility changes, and Roblox can refuse to make an experience public through an API key, so change visibility in Creator Hub. The agent can use every permission the key grants, so give the key only the scopes you want an agent to use. Requires an Open Cloud API key; see [Configuration](docs/configuration.md#environment-variables).
 
 ### Look up Roblox APIs
 
@@ -139,6 +147,18 @@ applies to development versions; a missing matching release is an error.
 
 </details>
 
+<details>
+<summary>Native Linux (Wine)</summary>
+
+On native Linux, Studio runs under Wine. To let the server launch and close it,
+set `ROBLOX_STUDIO_WINE_LAUNCHER` to an executable script and `ROBLOX_STUDIO_EXE`
+to `RobloxStudioBeta.exe` inside your Wine prefix. The server runs
+`<launcher> <RobloxStudioBeta.exe path> <Studio arguments...>`; the launcher sets
+up the prefix and display, then must `exec wine "$@"` so Studio keeps its PID.
+See [Native Linux with Wine](docs/configuration.md#native-linux-with-wine).
+
+</details>
+
 ## Inspector edition
 
 Read-only access to the DataModel.
@@ -150,7 +170,8 @@ Read-only access to the DataModel.
 
 No DataModel or script edits. The selection tool can change editor selection and
 camera framing; export and profiler tools can write files only to explicit local
-paths.
+paths, except that `capture_micro_profiler` keeps its 10 most recent captures in
+the system temp directory.
 
 Install only one variant at a time (the installers remove the other automatically):
 

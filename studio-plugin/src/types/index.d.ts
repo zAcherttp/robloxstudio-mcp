@@ -57,6 +57,32 @@ export interface StudioRequestContext {
 	executionOutcome?: "unknown" | "not_executed";
 }
 
+// Members are function properties, not methods, so plain functions such as
+// Utils.getInstancePath can be assigned directly under roblox-ts.
+export interface PathTree<T> {
+	readonly root: T;
+	readonly getParent: (node: T) => T | undefined;
+	readonly getChildren: (node: T) => T[];
+	readonly getName: (node: T) => string;
+	/** The service a root-level segment resolves to, when the segment names one. */
+	readonly getService: (segment: string) => T | undefined;
+	/** True when node is a root-level service that canonical paths address by class name. */
+	readonly isRootService: (node: T) => boolean;
+	readonly getPath: (node: T) => string;
+}
+
+/** The first path segment that more than one sibling could satisfy. */
+export interface PathAmbiguity {
+	segment: string;
+	parentPath: string;
+	matchCount: number;
+}
+
+export interface PathResolution<T> {
+	instance?: T;
+	ambiguity?: PathAmbiguity;
+}
+
 export interface StudioRequestEvent {
 	kind: "request";
 	requestId: string;
@@ -98,4 +124,34 @@ export interface TransportUpdate {
 
 declare global {
 	function loadstring(code: string): LuaTuple<[(() => unknown) | undefined, string?]>;
+
+	// Network simulation properties absent from @rbxts/types.
+	interface NetworkSettings {
+		InboundNetworkMinDelayMs: number;
+		OutboundNetworkMinDelayMs: number;
+		InboundNetworkJitterMs: number;
+		OutboundNetworkJitterMs: number;
+		InboundNetworkLossPercent: number;
+		OutboundNetworkLossPercent: number;
+	}
+
+	// @rbxts/types gives GlobalSettings no service map, so GetService accepts no name.
+	interface GlobalSettings {
+		GetService(this: GlobalSettings, className: "NetworkSettings"): NetworkSettings;
+	}
+
+	// The read surface of Studio's Device Emulator service, absent from @rbxts/types.
+	interface StudioDeviceSimulatorService extends Instance {
+		GetDeviceAsync(this: StudioDeviceSimulatorService): string;
+		GetDeviceListAsync(this: StudioDeviceSimulatorService): Array<unknown>;
+		GetDeviceInfoAsync(this: StudioDeviceSimulatorService, deviceId: string): unknown;
+		GetResolutionAsync(this: StudioDeviceSimulatorService): unknown;
+		GetPixelDensityAsync(this: StudioDeviceSimulatorService): unknown;
+		GetOrientationAsync(this: StudioDeviceSimulatorService): unknown;
+		GetScalingModeAsync(this: StudioDeviceSimulatorService): unknown;
+	}
+
+	interface Services {
+		StudioDeviceSimulatorService: StudioDeviceSimulatorService;
+	}
 }

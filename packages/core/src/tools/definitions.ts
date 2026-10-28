@@ -1,5 +1,7 @@
 import type { ToolAnnotations } from '@modelcontextprotocol/server';
 import { MAX_PNG_BASE64_CHARACTERS } from '../image-decode.js';
+import { MAX_OPERATION_ID_LENGTH, MAX_OPERATION_WAIT_MS } from '../bridge-service.js';
+import { SOCIAL_LINK_KINDS } from '../opencloud-client.js';
 
 export type ToolCategory = 'read' | 'write';
 
@@ -19,6 +21,22 @@ export interface ToolDefinition {
   outputSchema?: object;
   annotations?: ToolAnnotations;
 }
+
+/** Caller recovery ID shared by every tool whose retries join one retained operation. */
+const OPERATION_ID_PROPERTY = {
+  type: 'string',
+  minLength: 1,
+  maxLength: MAX_OPERATION_ID_LENGTH,
+  description: 'Unique recovery ID; reuse only for identical arguments.'
+} as const;
+
+/** Script classes a classFilter names exactly; "Script" excludes LocalScript and ModuleScript. */
+export const SCRIPT_CLASS_FILTERS = ['Script', 'LocalScript', 'ModuleScript'] as const;
+
+const EXPECTED_REVISION_PROPERTY = {
+  type: 'string',
+  description: 'Revision from the last read; rejects stale writes.'
+} as const;
 
 export const TOOL_DEFINITIONS: ToolDefinition[] = [
   // === File & Instance Browsing ===
@@ -46,7 +64,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
       properties: {
         query: {
           type: 'string',
-          description: 'Text, class, or property value to match.'
+          description: 'Substring; optional with className.'
         },
         searchType: {
           type: 'string',
@@ -57,12 +75,25 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
           type: 'string',
           description: 'Property to search when searchType is property.'
         },
+        path: {
+          type: 'string',
+          description: 'Subtree root; defaults to game.'
+        },
+        className: {
+          type: 'string',
+          description: 'IsA filter, e.g. BasePart.'
+        },
+        maxResults: {
+          type: 'integer',
+          minimum: 1,
+          maximum: 10000,
+          description: 'Default 100.'
+        },
         instance_id: {
           type: 'string',
           description: 'Studio process ID when ambiguous.'
         }
-      },
-      required: ['query']
+      }
     }
   },
 
@@ -124,12 +155,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
     inputSchema: {
       type: 'object',
       properties: {
-        operation_id: {
-          type: 'string',
-          minLength: 1,
-          maxLength: 128,
-          description: 'Unique recovery ID; reuse only for identical arguments.'
-        },
+        operation_id: OPERATION_ID_PROPERTY,
         instancePath: {
           type: 'string',
           description: 'Canonical path of the target instance.'
@@ -137,6 +163,14 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
         properties: {
           type: 'object',
           description: 'Property names mapped to new values.'
+        },
+        atomic: {
+          type: 'boolean',
+          description: 'Validate all first; undo applied writes if one fails.'
+        },
+        dryRun: {
+          type: 'boolean',
+          description: 'With atomic, validate and preview only.'
         },
         instance_id: {
           type: 'string',
@@ -179,6 +213,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
     inputSchema: {
       type: 'object',
       properties: {
+        operation_id: OPERATION_ID_PROPERTY,
         instancePath: {
           type: 'string',
           description: 'Canonical path of the script.'
@@ -187,6 +222,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
           type: 'string',
           description: 'Complete replacement source.'
         },
+        expected_revision: EXPECTED_REVISION_PROPERTY,
         instance_id: {
           type: 'string',
           description: 'Studio process ID when ambiguous.'
@@ -198,10 +234,11 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
   {
     name: 'edit_script_lines',
     category: 'write',
-    description: 'Use for an exact, localized replacement in one script.',
+    description: 'Use for exact replacements in one script; batched edits apply all or none.',
     inputSchema: {
       type: 'object',
       properties: {
+        operation_id: OPERATION_ID_PROPERTY,
         instancePath: {
           type: 'string',
           description: 'Canonical path of the script.'
@@ -218,12 +255,34 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
           type: 'string',
           description: 'Start line; required when old_string is not unique.'
         },
+        edits: {
+          type: 'array',
+          maxItems: 100,
+          description: 'Batch instead of old_string; all or none, one undo step.',
+          items: {
+            type: 'object',
+            properties: {
+              old_string: { type: 'string', description: 'Exact text; unique unless line_range is set.' },
+              new_string: { type: 'string', description: 'Replacement text.' },
+              line_range: { type: 'string', description: 'Start line in the source as read.' }
+            },
+            required: ['old_string', 'new_string']
+          }
+        },
+        expected_revision: {
+          type: 'string',
+          description: 'Revision from the last read; rejects stale edits.'
+        },
+        dry_run: {
+          type: 'boolean',
+          description: 'Preview the diff without editing.'
+        },
         instance_id: {
           type: 'string',
           description: 'Studio process ID when ambiguous.'
         }
       },
-      required: ['instancePath', 'old_string', 'new_string']
+      required: ['instancePath']
     }
   },
   {
@@ -233,6 +292,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
     inputSchema: {
       type: 'object',
       properties: {
+        operation_id: OPERATION_ID_PROPERTY,
         instancePath: {
           type: 'string',
           description: 'Canonical path of the script.'
@@ -245,6 +305,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
           type: 'string',
           description: 'Source text to insert.'
         },
+        expected_revision: EXPECTED_REVISION_PROPERTY,
         instance_id: {
           type: 'string',
           description: 'Studio process ID when ambiguous.'
@@ -260,6 +321,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
     inputSchema: {
       type: 'object',
       properties: {
+        operation_id: OPERATION_ID_PROPERTY,
         instancePath: {
           type: 'string',
           description: 'Canonical path of the script.'
@@ -268,6 +330,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
           type: 'string',
           description: 'Inclusive "N-M" or "N" range; open ends are invalid.'
         },
+        expected_revision: EXPECTED_REVISION_PROPERTY,
         instance_id: {
           type: 'string',
           description: 'Studio process ID when ambiguous.'
@@ -358,12 +421,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
     inputSchema: {
       type: 'object',
       properties: {
-        operation_id: {
-          type: 'string',
-          minLength: 1,
-          maxLength: 128,
-          description: 'Unique recovery ID; reuse only for identical arguments.'
-        },
+        operation_id: OPERATION_ID_PROPERTY,
         code: {
           type: 'string',
           description: 'Luau code to execute.'
@@ -387,6 +445,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
     inputSchema: {
       type: 'object',
       properties: {
+        operation_id: OPERATION_ID_PROPERTY,
         code: {
           type: 'string',
           description: 'Luau code; return a value to include it in the result.'
@@ -406,13 +465,14 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
     inputSchema: {
       type: 'object',
       properties: {
+        operation_id: OPERATION_ID_PROPERTY,
         code: {
           type: 'string',
           description: 'Luau code; return a value to include it in the result.'
         },
         target: {
           type: 'string',
-          description: 'Client peer; defaults to client-1.'
+          description: 'Client peer; defaults to the client named by instance_id, else client-1.'
         },
         instance_id: {
           type: 'string',
@@ -472,8 +532,8 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
         },
         classFilter: {
           type: 'string',
-          enum: ['Script', 'LocalScript', 'ModuleScript'],
-          description: 'Script class to include.'
+          enum: [...SCRIPT_CLASS_FILTERS],
+          description: 'Exact script class to include.'
         },
         instance_id: {
           type: 'string',
@@ -1087,10 +1147,16 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
   {
     name: 'capture_micro_profiler',
     category: 'read',
-    description: 'Use to profile engine and game frame time on a live peer.',
+    description: 'Use to profile engine and game frame time on a live peer, or to analyze a saved MicroProfiler capture.',
     inputSchema: {
       type: 'object',
       properties: {
+        action: {
+          type: 'string',
+          enum: ['capture', 'start', 'stop', 'analyze'],
+          default: 'capture',
+          description: 'capture records duration_ms; start/stop record around other tool calls; analyze reads input_path.'
+        },
         target: {
           type: 'string',
           pattern: '^(server|client-[0-9]+)$',
@@ -1100,8 +1166,12 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
           type: 'number',
           default: 1000,
           minimum: 100,
-          maximum: 5000,
-          description: 'Capture length in ms.'
+          maximum: 30000,
+          description: 'Recording length for action=capture.'
+        },
+        input_path: {
+          type: 'string',
+          description: 'Capture to analyze: an earlier capture.path or a MicroProfiler .gprx dump.'
         },
         focus: {
           type: 'string',
@@ -1155,23 +1225,25 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
           type: 'boolean',
           description: 'Include GPU events; defaults to false.'
         },
-        max_events: {
+        spike_frames: {
           type: 'number',
-          default: 250000,
-          minimum: 10000,
-          maximum: 1000000,
-          description: 'LibMP event inspection limit.'
+          minimum: 0,
+          maximum: 10,
+          description: 'Slowest frames to break down; 3, or 0 with filter.'
         },
-        frame_window: {
+        start_frame: {
           type: 'number',
-          default: 240,
           minimum: 1,
-          maximum: 2000,
-          description: 'Trailing frames to analyze.'
+          description: 'First frame_id to analyze.'
+        },
+        end_frame: {
+          type: 'number',
+          minimum: 1,
+          description: 'Last frame_id to analyze.'
         },
         output_path: {
           type: 'string',
-          description: 'Raw snapshot file; the response stays summarized.'
+          description: 'Capture file path; defaults to a kept temp file.'
         },
         summary_output_path: {
           type: 'string',
@@ -1277,15 +1349,21 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
   {
     name: 'get_request_status',
     category: 'read',
-    description: 'Use to recover a retained Studio operation outcome after a timeout.',
+    description: 'Use to check, await, or recover a retained Studio operation.',
     inputSchema: {
       type: 'object',
       properties: {
         request_id: {
           type: 'string',
           minLength: 1,
-          maxLength: 128,
+          maxLength: MAX_OPERATION_ID_LENGTH,
           description: 'Caller operation ID or request ID from a server error.'
+        },
+        wait_ms: {
+          type: 'integer',
+          minimum: 0,
+          maximum: MAX_OPERATION_WAIT_MS,
+          description: 'Max ms to await settlement; never cancels.'
         }
       },
       required: ['request_id']
@@ -1371,6 +1449,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
     inputSchema: {
       type: 'object',
       properties: {
+        operation_id: OPERATION_ID_PROPERTY,
         assetId: {
           type: 'number',
           description: 'Roblox asset ID to insert.'
@@ -1403,6 +1482,11 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
     inputSchema: {
       type: 'object',
       properties: {
+        operation_id: OPERATION_ID_PROPERTY,
+        async: {
+          type: 'boolean',
+          description: 'Return job status before generation ends.'
+        },
         prompt: {
           type: 'string',
           description: 'Generation prompt; required without an image.'
@@ -1463,7 +1547,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
           minimum: 1,
           maximum: 300000,
           default: 120000,
-          description: 'Bridge timeout in ms.'
+          description: 'Bridge deadline in ms; never cancels generation.'
         },
         instance_id: {
           type: 'string',
@@ -1573,6 +1657,170 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
     }
   },
 
+  // === Monetization ===
+  {
+    name: 'manage_monetization',
+    category: 'write',
+    description: 'Use to list, inspect, create, or update developer products and game passes.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        action: {
+          type: 'string',
+          enum: ['list', 'get', 'create', 'update'],
+          description: 'Operation; create and update change live Roblox items.'
+        },
+        kind: {
+          type: 'string',
+          enum: ['developer_product', 'game_pass'],
+          description: 'Item type.'
+        },
+        universe_id: {
+          type: 'integer',
+          minimum: 1,
+          description: 'Universe ID; defaults to the connected Studio place.'
+        },
+        id: {
+          type: 'integer',
+          minimum: 1,
+          description: 'Product or pass ID; required for get and update.'
+        },
+        name: {
+          type: 'string',
+          description: 'Item name; required for create.'
+        },
+        description: {
+          type: 'string',
+          description: 'Item description shown to buyers.'
+        },
+        price: {
+          type: 'integer',
+          minimum: 1,
+          maximum: 1000000000,
+          description: 'Default price in Robux.'
+        },
+        for_sale: {
+          type: 'boolean',
+          description: 'Purchasable; create defaults to false.'
+        },
+        managed_pricing: {
+          type: 'boolean',
+          description: 'Let Roblox price optimization set the price.'
+        },
+        image_path: {
+          type: 'string',
+          description: 'Local PNG, JPEG, or BMP icon file.'
+        },
+        page_token: {
+          type: 'string',
+          description: 'Prior list page token.'
+        },
+        instance_id: {
+          type: 'string',
+          description: 'Studio process ID when ambiguous.'
+        }
+      },
+      required: ['action', 'kind']
+    }
+  },
+
+  // === Experience Settings ===
+  {
+    name: 'manage_experience',
+    category: 'write',
+    description: 'Use to read or change experience settings such as title, devices, and private servers.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        action: {
+          type: 'string',
+          enum: ['get', 'update'],
+          description: 'Operation; update changes the live game.'
+        },
+        universe_id: {
+          type: 'integer',
+          minimum: 1,
+          description: 'Universe ID; defaults to the connected Studio place.'
+        },
+        place_id: {
+          type: 'integer',
+          minimum: 1,
+          description: 'Place to read or edit; defaults to the root place.'
+        },
+        name: {
+          type: 'string',
+          description: 'Place name; the experience title on the root place.'
+        },
+        description: {
+          type: 'string',
+          description: 'Place description; the experience description on the root.'
+        },
+        server_size: {
+          type: 'integer',
+          minimum: 1,
+          description: 'Maximum players per server.'
+        },
+        voice_chat_enabled: {
+          type: 'boolean',
+          description: 'Allow voice chat; running servers keep their setting.'
+        },
+        private_server_price: {
+          type: 'integer',
+          minimum: 0,
+          maximum: 1000000000,
+          description: 'Robux price; cancels subscriptions; needs confirm.'
+        },
+        disable_private_servers: {
+          type: 'boolean',
+          description: 'true turns private servers off; needs confirm.'
+        },
+        devices: {
+          type: 'object',
+          additionalProperties: false,
+          description: 'Devices players may join from.',
+          properties: {
+            desktop: { type: 'boolean', description: 'Desktop.' },
+            mobile: { type: 'boolean', description: 'Phone.' },
+            tablet: { type: 'boolean', description: 'Tablet.' },
+            console: { type: 'boolean', description: 'Console.' },
+            vr: { type: 'boolean', description: 'VR headset.' }
+          }
+        },
+        social_links: {
+          type: 'array',
+          description: 'Social links to add or replace.',
+          items: {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+              kind: { type: 'string', enum: [...SOCIAL_LINK_KINDS], description: 'Link kind.' },
+              title: { type: 'string', description: 'Link title.' },
+              uri: { type: 'string', description: 'Link URL.' }
+            },
+            required: ['kind', 'uri']
+          }
+        },
+        remove_social_links: {
+          type: 'array',
+          items: {
+            type: 'string',
+            enum: [...SOCIAL_LINK_KINDS]
+          },
+          description: 'Social link kinds to remove.'
+        },
+        confirm: {
+          type: 'boolean',
+          description: 'Required for private server price changes.'
+        },
+        instance_id: {
+          type: 'string',
+          description: 'Studio process ID when ambiguous.'
+        }
+      },
+      required: ['action']
+    }
+  },
+
   // === Input Simulation ===
   {
     name: 'simulate_mouse_input',
@@ -1602,9 +1850,13 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
           type: 'number',
           description: 'Pixels down, for delta and pan.'
         },
+        wheel: {
+          type: 'number',
+          description: 'For scroll; negative is down.'
+        },
         amount: {
           type: 'number',
-          description: 'Wheel steps for scroll (positive forward), or zoom for pinch (positive in); defaults to 1.'
+          description: 'Pinch zoom, positive in; defaults to 1.'
         },
         button: {
           type: 'string',
@@ -1778,6 +2030,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
     inputSchema: {
       type: 'object',
       properties: {
+        operation_id: OPERATION_ID_PROPERTY,
         source: {
           type: 'object',
           description: 'Exactly one path, URL, or base64 source. All inputs are capped below 37.5 MiB to fit base64 plus routing metadata within transport limits; URL downloads have a 30-second deadline.',
@@ -1818,6 +2071,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
     inputSchema: {
       type: 'object',
       properties: {
+        operation_id: OPERATION_ID_PROPERTY,
         pattern: {
           type: 'string',
           description: 'Literal text or Lua pattern.'
@@ -1840,16 +2094,22 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
         },
         classFilter: {
           type: 'string',
-          enum: ['Script', 'LocalScript', 'ModuleScript'],
-          description: 'Script class to include.'
+          enum: [...SCRIPT_CLASS_FILTERS],
+          description: 'Exact script class to include.'
         },
         dryRun: {
           type: 'boolean',
-          description: 'Preview without edits; defaults to false.'
+          description: 'Preview diffs and revisions without edits; defaults to false.'
         },
         maxReplacements: {
-          type: 'number',
-          description: 'Replacement safety cap; defaults to 1000.'
+          type: 'integer',
+          minimum: 1,
+          description: 'Total cap checked before any write; defaults to 1000.'
+        },
+        expected_revisions: {
+          type: 'object',
+          additionalProperties: { type: 'string' },
+          description: 'Script path to revision; pass the dryRun revisions.'
         },
         instance_id: {
           type: 'string',

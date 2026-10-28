@@ -15,15 +15,15 @@ Tool descriptions explain selection. Input schemas explain arguments. This guide
 ## Connection and paths
 
 - Use canonical DataModel paths returned by the tools. Paths usually start with game.
-- Call get_connected_instances when more than one Studio process may be connected. Pass either a top-level Instance ID or a multiplayer group's role-suffixed Instance ID as instance_id on later calls.
+- Call get_connected_instances when more than one Studio process may be connected. Pass either a top-level Instance ID or a multiplayer group's role-suffixed Instance ID as instance_id on later calls. A role-suffixed ID selects that server or client as the default target; a conflicting single-peer target is rejected.
 - Use get_place_info for the active place identity and settings.
 
 ## Discovery and edit work
 
 - Use get_project_structure for a bounded hierarchy, search_objects for an instance query, and grep_scripts for source text.
-- Use get_instance_properties and get_attributes after locating an instance.
+- Use get_instance_properties and get_attributes after locating an instance. get_attributes reports a CFrame value with Position and Components, the 12 CFrame.new arguments including rotation.
 - Use execute_luau for custom traversal, bulk edits, and work that would otherwise need many tool calls. It runs through the Studio plugin context.
-- Use set_properties when several known properties on one instance can be updated in one request.
+- Use set_properties when several known properties on one instance can be updated in one request. Pass atomic=true when none should change unless all validate; a failed write restores the applied values. Add dryRun=true to preview the conversions.
 
 ## Selection and viewport
 
@@ -35,15 +35,18 @@ Tool descriptions explain selection. Input schemas explain arguments. This guide
 ## Script changes
 
 - Read the relevant source with get_script_source before changing it.
-- Use edit_script_lines, insert_script_lines, or delete_script_lines for focused changes with known line numbers.
-- Use set_script_source only when replacing the whole script.
-- Use find_and_replace_in_scripts with dryRun first when a replacement may affect several scripts.
+- Use edit_script_lines, insert_script_lines, or delete_script_lines for focused changes with known line numbers. Pass the revision from get_script_source as expected_revision to insert_script_lines or delete_script_lines: line numbers name different text once the script changes, and a retried call is refused instead of applied twice.
+- Put several related replacements in one script into one edit_script_lines call with edits. They match the source as read, apply as one undo step, and none apply if any fails. Pass the revision from get_script_source as expected_revision so a script changed since the read is rejected, and use dry_run to preview the diff.
+- Use set_script_source only when replacing the whole script, with expected_revision when an editor draft may have changed it.
+- Use find_and_replace_in_scripts with dryRun first when a replacement may affect several scripts. The preview lists each script with its replacement count, diff, and revision. Apply with its revisions as expected_revisions to change exactly the reviewed scripts: any script edited, added, or no longer matching since the preview refuses the whole apply, and maxReplacements is checked against the total before the first write. If a write fails partway, the scripts already written are restored unless they changed again; those keep their newer text and the result returns their original source.
 
 ## Playtests and runtime Luau
 
 Start solo_playtest or multiplayer_playtest before targeting a live server or client. Stop the playtest when the scenario is complete.
 
 execute_luau runs through the Studio plugin. eval_server_runtime and eval_client_runtime run inside a live game VM and share that VM's require cache with game scripts. Use the eval tools when module state or the runtime Script or LocalScript environment matters. A project's .robloxstudio/eval-prelude.server.luau and .client.luau run once per playtest peer before its first eval (again if they change), for shared helpers in _G.
+
+Requests to a client Peer go through the server Peer's broker. client_broker_timeout and client_bridge_unresponsive describe that channel, not the game: the client can keep running while its bridge is stalled. Their message says whether the request reached the client, is still running there, or is held up between server and client. Do not treat them as a client hang. Check the game through eval_server_runtime, and restart the playtest if the bridge does not recover.
 
 Read output with get_runtime_logs. Reuse nextCursor as cursor for one Instance, or nextCursorByInstance as cursor_by_instance for a Multiplayer Group, instead of requesting the full process streams again.
 
@@ -58,6 +61,9 @@ Read output with get_runtime_logs. Reuse nextCursor as cursor for one Instance, 
 - Inspect built-in device IDs with get_device_simulator_state, then apply one with set_device_simulator or compare several with capture_device_matrix.
 - Clear temporary network and device settings with reset_simulation_state after a scenario.
 - Capture the viewport with capture_screenshot before simulate_mouse_input so the pixel coordinates match. Keyboard input should target a live client when game input is under test.
+- Mouse movement needs a client with a mouse; stop touch device emulation with set_device_simulator stopSimulation=true first.
+- To chain inputs in one call or target a GUI element by path, run execute_luau on that client and call UserInputService:CreateVirtualInput() (SendMouseButton, SendMousePosition, SendPointerAction, SendKey, SendTextInput). Convert a GuiObject's AbsolutePosition to viewport pixels by adding GuiService:GetGuiInset() unless its ScreenGui ignores the inset. Wrap the steps in pcall and release held keys and buttons in the same script; its VirtualInput is separate from the one simulate_mouse_input and simulate_keyboard_input use.
+- Do not lock the cursor (MouseBehavior.LockCenter, first-person camera) or call SendMouseDelta: Studio pins and hides the user's real OS cursor while it is locked.
 
 ## Debugging and profiling
 
@@ -67,6 +73,12 @@ Read output with get_runtime_logs. Reuse nextCursor as cursor for one Instance, 
 - check_rojo compares a Rojo project's scripts with the Studio edit session's by content. Run it after editing files and before trusting a playtest: a Rojo server that answers does not mean its Studio plugin is connected.
 - capture_heap_snapshot reports what holds Luau memory on a play peer and writes the full snapshot to output_path. For a leak, snapshot before and after the suspected action and pass the first file as compare_path.
 - capture_micro_profiler attributes frame time across engine and game work. Its rows are inclusive or cumulative views, so do not sum them as disjoint totals.
+- capture_micro_profiler records every frame of the window (up to 30 s with duration_ms). To profile a moment you trigger with other tools, such as opening a UI, call action=start, trigger it, then action=stop on the same target; a recording stops itself after 120 s.
+- Each result saves the raw capture at capture.path and analyzes it on the MCP host. spike_frames breaks the slowest frames down by thread, top timers, and hot path. Re-analyze a saved capture (over the same recorded frames) or a MicroProfiler .gprx dump with action=analyze and input_path, narrowing with focus, filter, start_frame, and end_frame, without recording again. LibMP (github.com/Roblox/libmp) also opens capture.path for custom analysis.
+- MicroProfiler records frames only while Studio renders. Studio stops rendering when the display turns off or Studio is minimized, and the capture then fails with micro_profiler_no_frames. A Studio window in the background draws about 15 fps while the game can keep running at 60 Hz: frame_summary.presented_fps reports how often Studio drew, and data_quality.render_throttled flags a throttled capture whose absolute costs are not representative.
+- MicroProfiler records a whole Studio process. In solo play edit, server, and client share one process, so any target's capture includes every role's timers (process_roles lists them) and a client is recorded through the server Peer. Use multiplayer_playtest for a separate process per role.
+- With filter, results include no spike_frames unless requested. summary_output_path also receives failures, so a script reading it sees why a capture produced no analysis.
+- data_quality.partial_reasons says when a result covers less than the requested window, for example capture_history_truncated when Studio could not stream the recording and its live history dropped frames.
 - Use baseline_path or baseline for before-and-after MicroProfiler comparisons.
 - Use get_memory_breakdown for memory categories and get_scene_analysis for instance, script, triangle, animation, or audio cost.
 
@@ -77,6 +89,28 @@ Search with search_assets, inspect a shortlist with get_asset_details or get_ass
 Studio must allow third-party asset loading for public third-party previews and insertion. preview_asset scans the complete hierarchy without returning script source. insert_asset removes every LuaSourceContainer and PackageLink before parenting the remaining content, then scans again before insertion.
 
 generate_model stages generated content under ServerStorage for review. upload_asset sends an explicit local file to the chosen Roblox user or group.
+
+generate_model with async=true returns a job status with its requestId before generation finishes. Check it, wait for it, or read its result with get_request_status (wait_ms waits for completion). The job stays on the Studio instance that started it. A disconnected caller or an ended wait never cancels it, and no tool can cancel a running generation. Pass operation_id so a retry with identical arguments joins the same job instead of generating a second model. With image_path or image_base64, the status adds phase (uploading, generating, completed, failed, or unknown when a wait ended without a result) and preparation; a retry reuses the uploaded image, and an upload whose outcome is unknown is never repeated. Results stay available for five minutes after the job finishes (or after timeout_ms passes without a result), within the current server session; large results can be evicted sooner.
+
+## Monetization
+
+manage_monetization lists, reads, creates, and updates developer products and game passes through Roblox Open Cloud. ROBLOX_OPEN_CLOUD_API_KEY needs developer-product:read and developer-product:write, or game-pass:read and game-pass:write, with the experience added to the key. universe_id defaults to the connected Studio place; an unpublished place has no universe.
+
+- Roblox cannot delete developer products or game passes. To retire one, update it with for_sale=false.
+- create keeps new items off sale unless for_sale=true, which also needs a price.
+- create refuses a name that already exists in the universe and returns the existing item. If a create times out, list the universe before retrying.
+- update changes only the arguments supplied, then reads the item back.
+- image_path uploads a local PNG, JPEG, or BMP icon. Roblox shows icons at 512x512 inside a circle, so keep details away from the corners.
+
+## Experience settings
+
+manage_experience reads and changes experience and place settings through Roblox Open Cloud. universe_id defaults to the connected Studio place, and place_id defaults to the root place, whose name and description are the experience title and description.
+
+- update changes only the arguments supplied, then reads the experience back. name, description, and server_size need universe.place:write; voice_chat_enabled, private_server_price, disable_private_servers, devices, social_links, and remove_social_links need universe:write.
+- Roblox refuses place edits while the place is open in an active Team Create session, including one in the connected Studio. update edits the place before the universe, so a refused place edit changes nothing.
+- Setting a private server price cancels existing subscriptions, and disabling private servers shuts down active ones, so these need confirm=true.
+- manage_experience cannot make an experience public or private. Open Cloud ignores visibility changes, and Roblox can refuse to make an experience public through an API key. get still reports visibility; change it in Creator Hub or Studio's Game Settings.
+- Genre, avatar, playtester, and other settings that Open Cloud does not expose, and the age rating, cannot be changed.
 
 ## RBXM files
 

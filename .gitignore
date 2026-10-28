@@ -90,3 +90,7 @@ local/
 
 # Fork build stamp (scripts/stamp-build.mjs)
 build-info.json
+# Release gate evidence written by npm run test:e2e:full and checked by
+# npm run publish:all. Only the emergency-override log is tracked.
+release/*
+!release/overrides.jsonl

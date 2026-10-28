@@ -7,8 +7,9 @@ import {
   type McpRequestContext,
   type ToolAnnotations,
 } from '@modelcontextprotocol/server';
-import { MultiplayerGroupInUseError, RequestFailure, RoutingFailure } from './bridge-service.js';
+import { MultiplayerGroupInUseError, RequestFailure, RoutingFailure, StudioOperationError } from './bridge-service.js';
 import { registerResourceHandlers } from './mcp-compat.js';
+import { OpenCloudOperationError } from './opencloud-client.js';
 import { StudioLaunchPreDispatchError } from './studio-instance-manager.js';
 import type { RobloxStudioTools } from './tools/index.js';
 import type { ToolDefinition } from './tools/definitions.js';
@@ -103,6 +104,8 @@ const OPEN_WORLD_TOOLS = new Set([
   'get_asset_thumbnail',
   'get_roblox_docs',
   'insert_asset',
+  'manage_experience',
+  'manage_monetization',
   'preview_asset',
   'search_assets',
   'upload_asset',
@@ -223,6 +226,17 @@ export function publicToolErrorBody(name: string, error: unknown): Record<string
   if (error instanceof RequestFailure) {
     return { error: error.code, message: error.message.slice(0, 500), ...error.details };
   }
+  if (error instanceof StudioOperationError) {
+    return { error: error.code, message: error.message.slice(0, 500), ...error.details };
+  }
+  if (error instanceof OpenCloudOperationError) {
+    return {
+      error: 'asset_upload_failed',
+      message: error.providerMessage.slice(0, 500),
+      ...(error.providerCode !== undefined ? { provider_code: error.providerCode } : {}),
+      operation_path: error.operationPath,
+    };
+  }
 
   console.error(`[tool:${name}]`, error);
   const message = error instanceof Error ? error.message : typeof error === 'string' ? error : 'Tool execution failed.';
@@ -287,12 +301,12 @@ export function serverInstructions(definitions: readonly ToolDefinition[]): stri
 
   if (has('get_connected_instances')) {
     instructions.push(
-      "When more than one Studio process scope is connected, call get_connected_instances and pass either a top-level instance id or a multiplayer group's role-suffixed instance id as instance_id.",
+      "When more than one Studio process scope is connected, call get_connected_instances and pass either a top-level instance id or a multiplayer group's role-suffixed instance id as instance_id. A role-suffixed id selects that server or client as the default target; a conflicting single-peer target is rejected.",
     );
   }
   if (has('get_request_status', 'execute_luau', 'set_properties')) {
     instructions.push(
-      'Supply a unique operation_id to execute_luau or set_properties when retry safety matters. After a timeout, query get_request_status with that ID before retrying. Identical arguments reuse a retained outcome; changed arguments are rejected. Recovery and deduplication are bounded to the current server session and five-minute retention window; result payloads may be evicted earlier. Unknown status does not mean unexecuted, and cancellation cannot roll back mutations.',
+      'Supply a unique operation_id to any Studio write tool that accepts one when retry safety matters. After a timeout, query get_request_status with that ID before retrying; pass wait_ms to wait for a late result. Ending that wait never cancels the operation. Identical arguments reuse a retained outcome; changed arguments are rejected. Recovery and deduplication are bounded to the current server session and five-minute retention window; result payloads may be evicted earlier. Unknown status does not mean unexecuted, and cancellation cannot roll back mutations. For script writes, expected_revision from the last read also refuses a repeated or stale write after that window.',
       'Request stages are queued, dispatched, executing (plugin handler entered), and response_delivery (handler returned or admission rejected). executionOutcome is separate from waiter state and delivery outcome; handler observations do not prove user Luau instructions ran. A waiter timeout is not an execution deadline or rollback. Neither missing progress nor connection loss proves completion.',
     );
   }
@@ -303,7 +317,7 @@ export function serverInstructions(definitions: readonly ToolDefinition[]): stri
   }
   if (has('set_script_source', 'edit_script_lines', 'insert_script_lines', 'delete_script_lines')) {
     instructions.push(
-      'Use set_script_source only for whole-script replacement. Use edit_script_lines, insert_script_lines, or delete_script_lines for focused changes.',
+      'Use set_script_source only for whole-script replacement. Use edit_script_lines, insert_script_lines, or delete_script_lines for focused changes. Put related replacements in one script into edit_script_lines edits so they apply together, and pass the revision from get_script_source as expected_revision.',
     );
   }
   if (has('solo_playtest', 'multiplayer_playtest', 'get_runtime_logs')) {

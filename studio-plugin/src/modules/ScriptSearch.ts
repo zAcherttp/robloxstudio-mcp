@@ -1,3 +1,5 @@
+import ScriptClasses from "./ScriptClasses";
+
 interface ScriptSnapshot {
 	instancePath: string;
 	name: string;
@@ -8,6 +10,8 @@ interface ScriptSnapshot {
 
 interface ScriptCorpus {
 	resolveRoot(path: string): Instance | undefined;
+	/** Optional per-search predicate: true when a script's emitted path names several instances. */
+	createAmbiguityChecker?(): (instance: Instance) => boolean;
 	getChildren(instance: Instance): Instance[];
 	readScript(instance: Instance, classFilter?: string): ScriptSnapshot | undefined;
 }
@@ -29,6 +33,7 @@ interface ScriptResult {
 	name: string;
 	className: string;
 	enabled?: boolean;
+	ambiguous?: true;
 	matches: LineMatch[];
 }
 
@@ -208,10 +213,13 @@ function createScriptSearch(corpus: ScriptCorpus) {
 			};
 		}
 		const maxResultsPerScript = (requestedMaxResultsPerScript as number | undefined) ?? 0;
+		const classError = ScriptClasses.classFilterError(requestData.classFilter);
+		if (classError !== undefined) return { error: "invalid_request", message: classError };
 		const classFilter = requestData.classFilter as string | undefined;
 		const searchPath = (requestData.path as string) ?? "";
 		const root = corpus.resolveRoot(searchPath);
 		if (root === undefined) return { error: `Path not found: ${searchPath}` };
+		const isAmbiguous = corpus.createAmbiguityChecker?.() ?? (() => false);
 
 		const searchPattern = caseSensitive ? pattern : pattern.lower();
 		const patternAlternatives = usePattern ? splitLuaAlternation(searchPattern) : undefined;
@@ -225,7 +233,7 @@ function createScriptSearch(corpus: ScriptCorpus) {
 			control.checkpoint();
 			const instance = stack.pop()!;
 			const snapshot = corpus.readScript(instance, classFilter);
-			if (snapshot !== undefined && (classFilter === undefined || snapshot.className === classFilter)) {
+			if (snapshot !== undefined && ScriptClasses.matchesClassFilter(snapshot.className, classFilter)) {
 				scriptsSearched++;
 				const scriptMatches: LineMatch[] = [];
 				const before: string[] = [];
@@ -309,6 +317,7 @@ function createScriptSearch(corpus: ScriptCorpus) {
 						matches: scriptMatches,
 					};
 					if (snapshot.enabled !== undefined) scriptResult.enabled = snapshot.enabled;
+					if (isAmbiguous(instance)) scriptResult.ambiguous = true;
 					results.push(scriptResult);
 				}
 			}

@@ -5,8 +5,9 @@ import { randomBytes } from 'node:crypto';
 import type { Duplex } from 'node:stream';
 import { WebSocketServer } from 'ws';
 import { toNodeHandler } from '@modelcontextprotocol/node';
-import { RobloxStudioTools } from './tools/index.js';
-import { BridgeService, MultiplayerGroupInUseError, RequestFailure, RoutingFailure } from './bridge-service.js';
+import { MAX_SCRIPT_EDITS, RobloxStudioTools } from './tools/index.js';
+import type { ScriptEdit } from './tools/index.js';
+import { BridgeService, isValidOperationId, MAX_OPERATION_WAIT_MS, MultiplayerGroupInUseError, PRIMARY_PROXY_FEATURES, RequestFailure, RoutingFailure } from './bridge-service.js';
 import type { PublicStudioInstance, PublicStudioPeer, RegisterPeerResult } from './bridge-service.js';
 import type { ToolDefinition } from './tools/definitions.js';
 import { createToolHttpHandler, normalizeToolResult, publicToolErrorBody } from './mcp-runtime.js';
@@ -76,7 +77,7 @@ const TOOL_PROXY_ENDPOINTS: Record<string, readonly string[]> = {
   capture_script_profiler: ['/api/capture-script-profiler'],
   capture_heap_snapshot: ['/api/execute-luau'],
   check_rojo: ['/api/execute-luau'],
-  capture_micro_profiler: ['/api/capture-micro-profiler'],
+  capture_micro_profiler: ['/api/capture-micro-profiler', '/api/micro-profiler-read', '/api/micro-profiler-release'],
   breakpoints: ['/api/breakpoints'],
   insert_asset: ['/api/insert-asset'],
   generate_model: ['/api/generate-model'],
@@ -90,6 +91,10 @@ const TOOL_PROXY_ENDPOINTS: Record<string, readonly string[]> = {
   export_rbxm: ['/api/export-rbxm'],
   import_rbxm: ['/api/import-rbxm'],
   find_and_replace_in_scripts: ['/api/find-and-replace-in-scripts'],
+  get_simulation_state: ['/api/get-network-simulation-state', '/api/get-device-simulator-state'],
+  get_device_simulator_state: ['/api/get-device-simulator-state'],
+  manage_monetization: ['/api/place-info'],
+  manage_experience: ['/api/place-info'],
 };
 
 type PassiveStudioPeer = Omit<PublicStudioPeer, 'peerId'>;
@@ -186,16 +191,60 @@ function requiredClosedLineRange(body: any, toolName: string): { startLine: numb
   return { startLine: parsed.startLine, endLine: parsed.endLine };
 }
 
+// edit_script_lines takes either one top-level old_string/new_string or an
+// `edits` array; mixing them would leave which edit wins ambiguous.
+function scriptEditsFromBody(body: Record<string, unknown>): ScriptEdit[] {
+  const toolName = 'edit_script_lines';
+  if (body.edits === undefined) {
+    if (typeof body.old_string !== 'string' || typeof body.new_string !== 'string') {
+      throw new Error(`Instance path, old_string, and new_string are required for ${toolName}`);
+    }
+    return [{ oldString: body.old_string, newString: body.new_string, startLine: optionalLineAnchor(body, toolName) }];
+  }
+  if (body.old_string !== undefined || body.new_string !== undefined || body.line_range !== undefined) {
+    throw new Error(`${toolName} takes either edits or old_string/new_string/line_range, not both`);
+  }
+  if (!Array.isArray(body.edits) || body.edits.length === 0) {
+    throw new Error(`${toolName} edits must be a nonempty array`);
+  }
+  if (body.edits.length > MAX_SCRIPT_EDITS) {
+    throw new Error(`${toolName} accepts at most ${MAX_SCRIPT_EDITS} edits`);
+  }
+  return body.edits.map((edit: unknown, index: number): ScriptEdit => {
+    if (!edit || typeof edit !== 'object' || Array.isArray(edit)) {
+      throw new Error(`${toolName} edits[${index}] must be an object`);
+    }
+    const fields = edit as Record<string, unknown>;
+    if (typeof fields.old_string !== 'string' || typeof fields.new_string !== 'string') {
+      throw new Error(`${toolName} edits[${index}] requires old_string and new_string`);
+    }
+    return {
+      oldString: fields.old_string,
+      newString: fields.new_string,
+      startLine: optionalLineAnchor(fields, `${toolName} edits[${index}]`),
+    };
+  });
+}
+
 export const TOOL_HANDLERS: Record<string, ToolHandler> = {
-  get_request_status: (tools, body) => tools.getRequestStatus(body.request_id),
+  get_request_status: (tools, body, context) => tools.getRequestStatus(body.request_id, body.wait_ms, context?.signal),
   get_roblox_skills: (tools, body) => tools.getRobloxSkills(body.action, body.name),
   get_project_lessons: (tools, body) => tools.getProjectLessons(body.domain, body.path),
   get_roblox_docs: (tools, body) => tools.getRobloxDocs(body.name, body.doc_type, body.section),
   get_place_info: (tools, body) => tools.getPlaceInfo(body.instance_id),
-  search_objects: (tools, body) => tools.searchObjects(body.query, body.searchType, body.propertyName, body.instance_id),
+  search_objects: (tools, body) => tools.searchObjects(body.query, {
+    searchType: body.searchType,
+    propertyName: body.propertyName,
+    path: body.path,
+    className: body.className,
+    maxResults: body.maxResults,
+  }, body.instance_id),
   get_instance_properties: (tools, body) => tools.getInstanceProperties(body.instancePath, body.excludeSource, body.instance_id),
   get_project_structure: (tools, body) => tools.getProjectStructure(body.path, body.maxDepth, body.scriptsOnly, body.instance_id),
-  set_properties: (tools, body) => tools.setProperties(body.instancePath, body.properties, body.instance_id, body.operation_id),
+  set_properties: (tools, body) => tools.setProperties(body.instancePath, body.properties, body.instance_id, body.operation_id, {
+    atomic: body.atomic,
+    dryRun: body.dryRun,
+  }),
   grep_scripts: (tools, body, context) => tools.grepScripts(body.pattern, {
     caseSensitive: body.caseSensitive,
     usePattern: body.usePattern,
@@ -210,18 +259,23 @@ export const TOOL_HANDLERS: Record<string, ToolHandler> = {
     const { startLine, endLine } = optionalLineRange(body, 'get_script_source');
     return tools.getScriptSource(body.instancePath, startLine, endLine, body.instance_id);
   },
-  set_script_source: (tools, body) => tools.setScriptSource(body.instancePath, body.source, body.instance_id),
-  edit_script_lines: (tools, body) => tools.editScriptLines(body.instancePath, body.old_string, body.new_string, optionalLineAnchor(body, 'edit_script_lines'), body.instance_id),
-  insert_script_lines: (tools, body) => tools.insertScriptLines(body.instancePath, body.afterLine, body.newContent, body.instance_id),
+  set_script_source: (tools, body) => tools.setScriptSource(body.instancePath, body.source, body.instance_id, body.operation_id, body.expected_revision),
+  edit_script_lines: (tools, body) => tools.editScriptLines(body.instancePath, scriptEditsFromBody(body), {
+    expectedRevision: body.expected_revision,
+    dryRun: body.dry_run,
+  }, body.instance_id, body.operation_id),
+  insert_script_lines: (tools, body) => tools.insertScriptLines(
+    body.instancePath, body.afterLine, body.newContent, body.instance_id, body.operation_id, body.expected_revision,
+  ),
   delete_script_lines: (tools, body) => {
     const { startLine, endLine } = requiredClosedLineRange(body, 'delete_script_lines');
-    return tools.deleteScriptLines(body.instancePath, startLine, endLine, body.instance_id);
+    return tools.deleteScriptLines(body.instancePath, startLine, endLine, body.instance_id, body.operation_id, body.expected_revision);
   },
   get_attributes: (tools, body) => tools.getAttributes(body.instancePath, body.instance_id),
   selection: (tools, body) => tools.selection(body.action, body, body.instance_id),
   execute_luau: (tools, body) => tools.executeLuau(body.code, body.target, body.instance_id, body.operation_id),
-  eval_server_runtime: (tools, body) => tools.evalServerRuntime(body.code, body.instance_id),
-  eval_client_runtime: (tools, body) => tools.evalClientRuntime(body.code, body.target, body.instance_id),
+  eval_server_runtime: (tools, body) => tools.evalServerRuntime(body.code, body.instance_id, body.operation_id),
+  eval_client_runtime: (tools, body) => tools.evalClientRuntime(body.code, body.target, body.instance_id, body.operation_id),
   set_network_profile: (tools, body) => tools.setNetworkProfile(body.profile, body.target, body.overrides, body.instance_id),
   get_simulation_state: (tools, body) => tools.getSimulationState(body.include, body.target, body.instance_id),
   reset_simulation_state: (tools, body) => tools.resetSimulationState(body.target, body.network, body.deviceSimulator, body.instance_id),
@@ -229,6 +283,8 @@ export const TOOL_HANDLERS: Record<string, ToolHandler> = {
   set_device_simulator: (tools, body) => tools.setDeviceSimulator(body.target, body.deviceId, body.orientation, body.resolution, body.pixelDensity, body.scalingMode, body.stopSimulation, body.instance_id),
   capture_device_matrix: (tools, body) => tools.captureDeviceMatrix(body.entries, body.target, body.format, body.quality, body.settleSeconds, body.restoreAfter, body.instance_id),
   manage_instance: (tools, body) => tools.manageInstance(body),
+  manage_monetization: (tools, body) => tools.manageMonetization(body, body.instance_id),
+  manage_experience: (tools, body) => tools.manageExperience(body, body.instance_id),
   solo_playtest: (tools, body) => tools.soloPlaytest(body.action, body.mode, body.timeout, body.instance_id),
   multiplayer_playtest: (tools, body) => tools.multiplayerPlaytest(body.action, body.numPlayers, body.target, body.testArgs, body.value, body.timeout, body.instance_id),
   get_runtime_logs: (tools, body, context) => tools.getRuntimeLogs(body.instance_id, body.multiplayer_group_id, body.cursor, body.cursor_by_instance, body.tail, body.filter, context?.signal),
@@ -252,23 +308,28 @@ export const TOOL_HANDLERS: Record<string, ToolHandler> = {
     top: body.top,
   }, body.instance_id),
   capture_micro_profiler: (tools, body) => tools.captureMicroProfiler(body.target, {
+    action: body.action,
     duration_ms: body.duration_ms,
+    input_path: body.input_path,
     focus: body.focus,
     filter: body.filter,
     max_timers: body.max_timers,
     min_total_us: body.min_total_us,
     include_idle: body.include_idle,
     include_gpu: body.include_gpu,
-    max_events: body.max_events,
-    frame_window: body.frame_window,
+    spike_frames: body.spike_frames,
+    start_frame: body.start_frame,
+    end_frame: body.end_frame,
     max_groups: body.max_groups,
     max_timers_per_group: body.max_timers_per_group,
+    max_related_timers: body.max_related_timers,
     summary_output_path: body.summary_output_path,
     baseline_path: body.baseline_path,
     baseline: body.baseline,
     baseline_label: body.baseline_label,
     current_label: body.current_label,
     max_comparison_rows: body.max_comparison_rows,
+    include_comparison_index: body.include_comparison_index,
     output_path: body.output_path,
   }, body.instance_id),
   breakpoints: (tools, body) => tools.breakpoints(body.action, body, body.target, body.instance_id),
@@ -276,7 +337,7 @@ export const TOOL_HANDLERS: Record<string, ToolHandler> = {
   search_assets: (tools, body) => tools.searchAssets(body.assetType, body.query, body.maxResults, body.sortBy, body.robloxCreatedOnly),
   get_asset_details: (tools, body) => tools.getAssetDetails(body.assetId),
   get_asset_thumbnail: (tools, body) => tools.getAssetThumbnail(body.assetId, body.size),
-  insert_asset: (tools, body) => tools.insertAsset(body.assetId, body.parentPath, body.position, body.instance_id),
+  insert_asset: (tools, body) => tools.insertAsset(body.assetId, body.parentPath, body.position, body.instance_id, body.operation_id),
   generate_model: (tools, body) => tools.generateModel(body, body.instance_id),
   preview_asset: (tools, body) => tools.previewAsset(
     body.assetId,
@@ -288,13 +349,15 @@ export const TOOL_HANDLERS: Record<string, ToolHandler> = {
   ),
   upload_asset: (tools, body) => tools.uploadAsset(body.filePath, body.assetType, body.displayName, body.description, body.userId, body.groupId),
   capture_screenshot: (tools, body) => tools.captureScreenshot(body.instance_id, body.format, body.quality),
-  simulate_mouse_input: (tools, body) => tools.simulateMouseInput(body.action, body.x, body.y, body.button, { dx: body.dx, dy: body.dy, amount: body.amount }, body.target, body.instance_id),
+  simulate_mouse_input: (tools, body) => tools.simulateMouseInput(body.action, body.x, body.y, body.button, body.wheel, body.target, body.instance_id, { dx: body.dx, dy: body.dy, amount: body.amount }),
   simulate_input_sequence: (tools, body) => tools.simulateInputSequence(body.steps, body.target, body.instance_id),
   simulate_keyboard_input: (tools, body) => tools.simulateKeyboardInput(body.keyCode, body.action, body.duration, body.text, body.target, body.instance_id),
   get_memory_breakdown: (tools, body) => tools.getMemoryBreakdown(body.target, body.tags, body.instance_id),
   get_scene_analysis: (tools, body) => tools.getSceneAnalysis(body.mode, body.target, body.topN, body.raw, body.instance_id),
   export_rbxm: (tools, body) => tools.exportRbxm(body.instance_paths, body.output_path, body.target, body.instance_id),
-  import_rbxm: (tools, body, context) => tools.importRbxm(body.source, body.parent_path, body.target, body.instance_id, context?.signal),
+  import_rbxm: (tools, body, context) => tools.importRbxm(
+    body.source, body.parent_path, body.target, body.instance_id, context?.signal, body.operation_id,
+  ),
   find_and_replace_in_scripts: (tools, body) => tools.findAndReplaceInScripts(body.pattern, body.replacement, {
     caseSensitive: body.caseSensitive,
     usePattern: body.usePattern,
@@ -302,7 +365,8 @@ export const TOOL_HANDLERS: Record<string, ToolHandler> = {
     classFilter: body.classFilter,
     dryRun: body.dryRun,
     maxReplacements: body.maxReplacements,
-  }, body.instance_id),
+    expectedRevisions: body.expected_revisions,
+  }, body.instance_id, body.operation_id),
 };
 
 const MAX_STUDIO_SESSIONS = 256;
@@ -856,6 +920,7 @@ export function createHttpServer(tools: RobloxStudioTools, bridge: BridgeService
     res.json({
       ...bridge.getTopologySnapshot(),
       serverVersion: serverConfig?.version,
+      proxyFeatures: PRIMARY_PROXY_FEATURES,
     });
   });
 
@@ -872,18 +937,32 @@ export function createHttpServer(tools: RobloxStudioTools, bridge: BridgeService
     res.status(426).json({ error: 'studio_websocket_required', protocolVersion: STUDIO_PROTOCOL_VERSION });
   });
 
-  app.get('/request-status', (req, res) => {
+  app.get('/request-status', async (req, res) => {
     const requestId = req.query.requestId;
     if (typeof requestId !== 'string' || requestId.length === 0 || requestId.length > 1024) {
       res.status(400).json({ error: 'invalid_request_id' });
       return;
     }
-    res.json({ status: bridge.getRequestStatus(requestId) ?? null });
+    const waitMs = req.query.waitMs === undefined ? 0 : Number(req.query.waitMs);
+    if (!Number.isInteger(waitMs) || waitMs < 0 || waitMs > MAX_OPERATION_WAIT_MS) {
+      res.status(400).json({ error: `waitMs must be an integer between 0 and ${MAX_OPERATION_WAIT_MS}` });
+      return;
+    }
+    // A disconnected caller ends only its own wait, never the operation.
+    const controller = new AbortController();
+    const abort = () => controller.abort();
+    res.once('close', abort);
+    try {
+      const status = await bridge.waitForRequestStatus(requestId, waitMs, controller.signal);
+      if (!res.destroyed) res.json({ status: status ?? null });
+    } finally {
+      res.removeListener('close', abort);
+    }
   });
 
 
   app.post('/proxy', async (req, res) => {
-    const { endpoint, data, targetPeerId, proxyInstanceId, timeoutMs, operationId } = req.body;
+    const { endpoint, data, targetPeerId, proxyInstanceId, timeoutMs, operationId, identity, submit } = req.body;
 
     if (!endpoint || !targetPeerId) {
       res.status(400).json({ error: 'endpoint and targetPeerId are required' });
@@ -906,8 +985,12 @@ export function createHttpServer(tools: RobloxStudioTools, bridge: BridgeService
     if (proxyInstanceId) {
       proxyInstances.add(proxyInstanceId);
     }
-    if (operationId !== undefined && (typeof operationId !== 'string' || operationId.trim().length === 0 || operationId.length > 128)) {
+    if (operationId !== undefined && !isValidOperationId(operationId)) {
       res.status(400).json({ error: 'operationId must be a non-empty string of at most 128 characters' });
+      return;
+    }
+    if (submit !== undefined && typeof submit !== 'boolean') {
+      res.status(400).json({ error: 'submit must be a boolean' });
       return;
     }
 
@@ -916,14 +999,11 @@ export function createHttpServer(tools: RobloxStudioTools, bridge: BridgeService
     req.once('aborted', abort);
     res.once('close', abort);
     try {
-      const response = await bridge.sendRequest(
-        endpoint,
-        data,
-        targetPeerId,
-        timeoutMs,
-        controller.signal,
-        operationId,
-      );
+      // A submission is answered at admission and outlives this HTTP exchange;
+      // only a waiting request is tied to it.
+      const response = submit
+        ? await bridge.submitRequest(endpoint, data, targetPeerId, timeoutMs, operationId, identity)
+        : await bridge.sendRequest(endpoint, data, targetPeerId, timeoutMs, controller.signal, operationId, identity);
       res.json({ response });
     } catch (error) {
       if (!res.headersSent && !res.destroyed) {
