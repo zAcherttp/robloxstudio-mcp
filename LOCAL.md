@@ -116,6 +116,14 @@ is a conflict waiting at the next merge. What this fork carries on top of upstre
   module instead of destroying it (the job destroys it when it ends); an older plugin destroys it,
   and the job may die with it.
 
+- **Rarely used tools deferred** (`DEFERRED_TOOLS` in `packages/core/src/tools/definitions.ts`,
+  `createToolServer` in `mcp-runtime.ts`). 25 tools that every local agent transcript together had
+  called at most 17 times each (profilers, Creator Store assets, monetization, rbxm import, script
+  line edits: these games edit scripts on disk through Rojo) are registered disabled. A
+  `more_tools` tool lists them and enables any by name (the SDK sends `tools/list_changed`); the
+  enabled set lasts for the server's life. `ROBLOXSTUDIO_MCP_ALL_TOOLS=1` lists everything. The
+  listed catalog went from 54,979 to 26,213 characters; the HTTP tool routes are unaffected.
+
 - **A registry of running servers** (`packages/core/src/server-registry.ts`, `scripts/servers.mjs`,
   `npm run servers`). Every MCP client session starts its own server (Claude Code: one per
   session, in every project when configured at user level), and each keeps the code it started

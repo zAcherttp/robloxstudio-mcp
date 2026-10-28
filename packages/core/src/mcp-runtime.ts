@@ -12,7 +12,7 @@ import { registerResourceHandlers } from './mcp-compat.js';
 import { OpenCloudOperationError } from './opencloud-client.js';
 import { StudioLaunchPreDispatchError } from './studio-instance-manager.js';
 import type { RobloxStudioTools } from './tools/index.js';
-import type { ToolDefinition } from './tools/definitions.js';
+import { DEFERRED_TOOLS, type ToolDefinition } from './tools/definitions.js';
 
 export type ProtocolEra = McpRequestContext['era'];
 
@@ -340,14 +340,31 @@ export function serverInstructions(definitions: readonly ToolDefinition[]): stri
     instructions.push('Use get_roblox_docs instead of guessing unfamiliar engine or Luau APIs.');
   }
 
+  if (definitions.some((definition) => isDeferredTool(definition.name))) {
+    instructions.push('Rarely used tools (profilers, assets, script line edits) appear after more_tools enables them.');
+  }
   instructions.push('Read robloxstudio://tool-guides for detailed workflows and safety notes.');
   return instructions.join(' ');
+}
+
+// Deferred tools a client has enabled with more_tools, per server config: the HTTP transport builds
+// a server per request, and an enabled tool must stay listed for the next one.
+const enabledDeferredTools = new WeakMap<McpRuntimeConfig, Set<string>>();
+
+export function isDeferredTool(name: string, env: NodeJS.ProcessEnv = process.env): boolean {
+  return env.ROBLOXSTUDIO_MCP_ALL_TOOLS !== '1' && DEFERRED_TOOLS.has(name);
 }
 
 export function createToolServer(options: McpRuntimeOptions): McpServer {
   const definitions = options.config.tools.filter(
     (definition) => !options.allowedTools || options.allowedTools.has(definition.name),
   );
+  let enabled = enabledDeferredTools.get(options.config);
+  if (!enabled) {
+    enabled = new Set<string>();
+    enabledDeferredTools.set(options.config, enabled);
+  }
+  const deferred = new Map<string, { definition: ToolDefinition; registered: { enable(): void } }>();
   const server = new McpServer({
     name: options.config.name,
     version: options.config.version,
@@ -359,7 +376,7 @@ export function createToolServer(options: McpRuntimeOptions): McpServer {
   for (const definition of definitions) {
     const publicDefinition = publicToolDefinition(definition);
 
-    server.registerTool(
+    const registered = server.registerTool(
       definition.name,
       {
         description: publicDefinition.description,
@@ -384,6 +401,47 @@ export function createToolServer(options: McpRuntimeOptions): McpServer {
             isError: true,
           }, options.era);
         }
+      },
+    );
+    if (isDeferredTool(definition.name) && !enabled.has(definition.name)) {
+      registered.disable();
+      deferred.set(definition.name, { definition, registered });
+    }
+  }
+
+  if (deferred.size > 0) {
+    const enabledSet = enabled;
+    server.registerTool(
+      'more_tools',
+      {
+        description: 'Use to list rarely used tools (profilers, assets, script edits, monetization) or enable some by name.',
+        inputSchema: fromJsonSchema<Record<string, unknown>>({
+          type: 'object',
+          properties: {
+            enable: { type: 'array', items: { type: 'string' }, description: 'Tool names to enable; omit to list them.' },
+          },
+        }),
+        annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+      },
+      async (args) => {
+        const names = Array.isArray((args as { enable?: unknown }).enable) ? (args as { enable: unknown[] }).enable : [];
+        if (names.length === 0) {
+          const list = [...deferred.values()].map(({ definition }) => `${definition.name}: ${concise(definition.description, 90, true)}`);
+          return { content: [{ type: 'text', text: list.length > 0 ? list.join('\n') : 'Every tool is enabled.' }] };
+        }
+        const unknown = names.filter((name) => typeof name !== 'string' || !deferred.has(name));
+        const done: string[] = [];
+        for (const name of names) {
+          const entry = typeof name === 'string' ? deferred.get(name) : undefined;
+          if (!entry) continue;
+          entry.registered.enable();
+          enabledSet.add(name as string);
+          deferred.delete(name as string);
+          done.push(name as string);
+        }
+        const text = `Enabled: ${done.join(', ') || 'none'}.`
+          + (unknown.length > 0 ? ` Not deferred or unknown: ${unknown.join(', ')}.` : '');
+        return { content: [{ type: 'text', text }], ...(done.length === 0 ? { isError: true } : {}) };
       },
     );
   }
