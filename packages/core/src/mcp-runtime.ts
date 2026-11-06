@@ -12,6 +12,7 @@ import { registerResourceHandlers } from './mcp-compat.js';
 import { OpenCloudOperationError } from './opencloud-client.js';
 import { StudioLaunchPreDispatchError } from './studio-instance-manager.js';
 import type { RobloxStudioTools } from './tools/index.js';
+import { ReferenceUploadError } from './tools/reference-uploads.js';
 import { DEFERRED_TOOLS, type ToolDefinition } from './tools/definitions.js';
 
 export type ProtocolEra = McpRequestContext['era'];
@@ -149,8 +150,9 @@ function parseJsonObject(text: string): Record<string, unknown> | undefined {
 
 /**
  * Converts the historic JSON-in-text result shape into the lean 2026 MCP shape.
- * Modern clients receive JSON once in structuredContent; legacy clients keep the
- * text projection required by older SDKs. Human-readable text and media survive.
+ * Modern clients receive JSON once in structuredContent (the MCP handler adds it
+ * back as text on failures; see withErrorText); legacy clients keep the text
+ * projection required by older SDKs. Human-readable text and media survive.
  */
 export function normalizeToolResult(raw: unknown, era: ProtocolEra): CallToolResult {
   const result = (raw && typeof raw === 'object' ? raw : {}) as ToolResultLike;
@@ -195,6 +197,19 @@ export function normalizeToolResult(raw: unknown, era: ProtocolEra): CallToolRes
   };
 }
 
+// Clients such as Claude Code show a failed call's text content and ignore its
+// structuredContent, so an error with no text block reaches the user as
+// "Unknown error". Keep the error JSON as text on MCP failures.
+function withErrorText(result: CallToolResult): CallToolResult {
+  if (!result.isError || !result.structuredContent || result.content.some((block) => block.type === 'text')) {
+    return result;
+  }
+  return {
+    ...result,
+    content: [{ type: 'text', text: JSON.stringify(result.structuredContent) }, ...result.content],
+  };
+}
+
 function publicRoutingError(error: RoutingFailure): Record<string, unknown> {
   return {
     error: error.routingError.code,
@@ -236,6 +251,9 @@ export function publicToolErrorBody(name: string, error: unknown): Record<string
       ...(error.providerCode !== undefined ? { provider_code: error.providerCode } : {}),
       operation_path: error.operationPath,
     };
+  }
+  if (error instanceof ReferenceUploadError) {
+    return { error: error.code, message: error.message.slice(0, 500) };
   }
 
   console.error(`[tool:${name}]`, error);
@@ -394,12 +412,12 @@ export function createToolServer(options: McpRuntimeOptions): McpServer {
             args as Record<string, unknown>,
             { signal: context.mcpReq.signal },
           );
-          return normalizeToolResult(raw, options.era);
+          return withErrorText(normalizeToolResult(raw, options.era));
         } catch (error) {
-          return normalizeToolResult({
+          return withErrorText(normalizeToolResult({
             content: [{ type: 'text', text: JSON.stringify(publicToolErrorBody(definition.name, error)) }],
             isError: true,
-          }, options.era);
+          }, options.era));
         }
       },
     );

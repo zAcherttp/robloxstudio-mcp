@@ -13,6 +13,7 @@ import {
 } from '../mcp-runtime.js';
 import { getReadOnlyTools, TOOL_DEFINITIONS } from '../tools/definitions.js';
 import type { RobloxStudioTools } from '../tools/index.js';
+import { ReferenceUploadError } from '../tools/reference-uploads.js';
 
 type JsonObject = Record<string, unknown>;
 
@@ -243,6 +244,18 @@ describe('MCP v2 tool runtime', () => {
       message: expect.stringContaining('test:live'),
       multiplayer_group_id: 'test:live',
     });
+  });
+
+  test('keeps reference upload failure codes without logging them as tool failures', () => {
+    const consoleError = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+    try {
+      const error = new ReferenceUploadError(`Reference image upload for operation job has an unknown outcome: ${'x'.repeat(600)}`, 'reference_upload_unknown');
+      const body = publicToolErrorBody('generate_model', error);
+      expect(body).toEqual({ error: 'reference_upload_unknown', message: error.message.slice(0, 500) });
+      expect(consoleError).not.toHaveBeenCalled();
+    } finally {
+      consoleError.mockRestore();
+    }
   });
 
 
@@ -505,6 +518,39 @@ describe('MCP v2 tool runtime', () => {
 
       const result = await client.callTool({ name: 'get_place_info', arguments: {} });
       expect(result.structuredContent).toEqual({ placeId: 123 });
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  });
+
+  test.each([
+    ['returned', async () => ({
+      content: [{ type: 'text', text: JSON.stringify({ error: 'Studio window appears minimized' }) }],
+    })],
+    ['thrown', async () => {
+      throw new Error('Studio window appears minimized');
+    }],
+  ])('keeps the error text on a %s failure for modern clients', async (_kind, invoke) => {
+    const definition = TOOL_DEFINITIONS.find((tool) => tool.name === 'get_place_info')!;
+    const server = createToolServer({
+      config: { name: 'test-server', version: '3.0.0', tools: [definition] },
+      getTools: () => ({} as RobloxStudioTools),
+      era: 'modern',
+      invoke,
+    });
+    const client = new Client({ name: 'test-client', version: '1.0.0' });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await server.connect(serverTransport);
+    await client.connect(clientTransport);
+
+    try {
+      const result = await client.callTool({ name: 'get_place_info', arguments: {} });
+      expect(result.isError).toBe(true);
+      expect(result.content).toEqual([
+        { type: 'text', text: JSON.stringify(result.structuredContent) },
+      ]);
+      expect(JSON.stringify(result.content)).toContain('Studio window appears minimized');
     } finally {
       await client.close();
       await server.close();
