@@ -5,6 +5,7 @@ import * as os from 'os';
 import * as path from 'path';
 import { promisify } from 'util';
 import { fileTimeToUnixMs, waitForStudioSignInToSettle } from './studio-sign-in.js';
+import { findPlaytestProcesses, playtestProcessRole, type PlaytestProcess, type StudioProcessNode } from './playtest-processes.js';
 import {
   ManagedInstanceRegistry,
   type ManagedProcessObservation,
@@ -31,6 +32,7 @@ import {
   listWineStudioProcesses,
   spawnWineStudio,
   stopWineStudio,
+  readWineProcessStartTime,
   toWineWindowsPath,
 } from './studio-wine.js';
 
@@ -104,6 +106,26 @@ export type StudioProcessSnapshot =
   | { status: 'ok'; observedAt: number; processes: StudioProcessInfo[] }
   | { status: 'error'; observedAt: number; error: string };
 
+/** Studio processes with their parents and command lines; `unavailable` where the host cannot report them. */
+export type StudioProcessTreeSnapshot =
+  | { status: 'ok'; observedAt: number; processes: StudioProcessNode[] }
+  | { status: 'unavailable'; reason: string }
+  | { status: 'error'; observedAt: number; error: string };
+
+/** The test windows of one edit Studio, or why they cannot be listed. */
+export type PlaytestProcessListing =
+  | { status: 'ok'; editProcessId: number; processes: PlaytestProcess[] }
+  | { status: 'unavailable'; reason: string }
+  /** Windows could be listed here, but this attempt failed: nothing is known. */
+  | { status: 'error'; error: string };
+
+export interface PlaytestProcessCloseResult {
+  closed: PlaytestProcess[];
+  /** Still running at the deadline, or not verifiable. */
+  remaining: PlaytestProcess[];
+  error?: string;
+}
+
 const BASEPLATE_TEMP_DIR = path.join(os.tmpdir(), 'robloxstudio-mcp-baseplates');
 const BASEPLATE_TEMP_NAME = /^Baseplate-\d+-\d+\.rbxl$/;
 const BASEPLATE_TEMPLATE_NAME = 'Baseplate.rbxl';
@@ -138,6 +160,7 @@ const retainedLaunchControls = new Map<string, StudioLaunchControl>();
 
 export interface StudioProcessAdapter {
   observeStudioProcesses?: () => StudioProcessSnapshot | Promise<StudioProcessSnapshot>;
+  observeStudioProcessTree?: () => StudioProcessTreeSnapshot | Promise<StudioProcessTreeSnapshot>;
   listStudioProcesses?: () => StudioProcessInfo[] | Promise<StudioProcessInfo[]>;
   stopProcess?: (processId: number, startedAt?: string) => unknown | Promise<unknown>;
   resolveStudioExe?: () => string | Promise<string>;
@@ -896,6 +919,32 @@ export function buildWindowsStudioStopScript(processId: number, startedAt: strin
   ].join('; ');
 }
 
+/** Ends each exact process (PID plus creation FILETIME) in one PowerShell call. */
+export function buildWindowsStudioStopManyScript(targets: { pid: number; startedAt: string }[]): string {
+  for (const { pid, startedAt } of targets) {
+    if (!Number.isSafeInteger(pid) || pid <= 0) throw new Error('processId must be a positive integer.');
+    if (!/^[1-9]\d*$/u.test(startedAt)) throw new Error('startedAt must be a positive FILETIME string.');
+  }
+  return [
+    'function Stop-ExactStudio([int]$processId, [long]$expectedStartedAt) {',
+    '$studio = $null',
+    'try { $studio = [System.Diagnostics.Process]::GetProcessById($processId) } catch [System.ArgumentException] { return $null }',
+    'try {',
+    'if ($studio.StartTime.ToUniversalTime().ToFileTimeUtc() -ne $expectedStartedAt) { $studio.Dispose(); return $null }',
+    'if (-not $studio.HasExited) { try { $studio.Kill() } catch { if (-not $studio.HasExited) { $studio.Dispose(); throw } } }',
+    'return $studio',
+    '} catch { $studio.Dispose(); throw }',
+    '}',
+    '$stopped = @()',
+    '$failures = @()',
+    // One process that cannot be ended must not keep the others running.
+    ...targets.map(({ pid, startedAt }) =>
+      `try { $stopped += @(Stop-ExactStudio ${pid} ${startedAt}) } catch { $failures += "${pid}: $($_.Exception.Message)" }`),
+    'foreach ($studio in $stopped) { if ($null -ne $studio) { try { $studio.WaitForExit() } finally { $studio.Dispose() } } }',
+    'if ($failures.Count -gt 0) { throw ($failures -join "; ") }',
+  ].join('\n');
+}
+
 let studioLogsRoot: Promise<string | undefined> | undefined;
 
 // Default pre-close wait: see studio-sign-in.ts for why an in-progress sign-in
@@ -1315,15 +1364,30 @@ function resolveStudioExeFromVersions(root: string): string {
   // version can start the same interrupted update again.
   const exe = candidates[0];
   const installationDir = path.dirname(exe);
-  const hasIncompleteDownload = readdirSync(installationDir).some((name) => /\.crdownload$/i.test(name));
   const settings = statSync(path.join(installationDir, 'AppSettings.xml'), { throwIfNoEntry: false });
-  if (hasIncompleteDownload || !settings?.isFile() || settings.size === 0) {
-    const reason = hasIncompleteDownload
-      ? 'an unfinished .crdownload download is present'
+  const settingsComplete = settings !== undefined && settings.isFile() && settings.size > 0;
+  const exeModifiedMs = statSync(exe).mtimeMs;
+  // The bootstrapper creates an empty marker when an update starts and does not
+  // always remove it. An empty marker older than both the executable and
+  // AppSettings.xml (written last) is left over from an install that finished.
+  const unfinishedDownloads = readdirSync(installationDir)
+    .filter((name) => /\.crdownload$/i.test(name))
+    .filter((name) => {
+      const marker = statSync(path.join(installationDir, name), { throwIfNoEntry: false });
+      if (!marker) return false;
+      const stale = settingsComplete && marker.isFile() && marker.size === 0 &&
+        marker.mtimeMs < exeModifiedMs && marker.mtimeMs < settings.mtimeMs;
+      return !stale;
+    });
+  if (unfinishedDownloads.length > 0 || !settingsComplete) {
+    const reason = unfinishedDownloads.length > 0
+      ? `an unfinished download is present (${unfinishedDownloads.slice(0, 3).join(', ')}; non-empty or newer than RobloxStudioBeta.exe/AppSettings.xml)`
       : 'AppSettings.xml is missing, empty, or not a regular file';
     throw new Error(
       `Roblox Studio installation/update is incomplete at ${installationDir}: ${reason}. ` +
-      'Complete the installation/update or reinstall Roblox Studio under the owning Windows account before launching.',
+      'Complete the installation/update or reinstall Roblox Studio under the owning Windows account before launching. ' +
+      'If this installation is known to work, pass studio_executable to manage_instance launch, or set ROBLOX_STUDIO_EXE ' +
+      'for the MCP server that owns the Studio port.',
     );
   }
   return exe;
@@ -1436,6 +1500,57 @@ export function listStudioProcesses(): StudioProcessInfo[] {
     return parseWindowsStudioProcesses(powershell(WINDOWS_STUDIO_PROCESS_QUERY));
   } catch (error) {
     throw new Error(`Could not enumerate Roblox Studio processes: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
+// Get-Process supplies the creation time used as process identity everywhere
+// else; Win32_Process adds the parent PID and command line.
+const WINDOWS_STUDIO_PROCESS_TREE_QUERY = [
+  "$ErrorActionPreference = 'Stop'",
+  '$studio = @(); try { $studio = @(Get-Process RobloxStudioBeta -ErrorAction Stop) } catch { if ($_.FullyQualifiedErrorId -notlike "NoProcessFoundForGivenName,*") { throw } }',
+  '$details = @{}',
+  'if ($studio.Count -gt 0) { Get-CimInstance Win32_Process -Filter "Name=\'RobloxStudioBeta.exe\'" | ForEach-Object { $details[[int]$_.ProcessId] = $_ } }',
+  '$processes = @($studio | ForEach-Object { $detail = $details[[int]$_.Id]; [PSCustomObject]@{ Id = $_.Id; ' +
+    'ParentId = $(if ($null -ne $detail) { [int]$detail.ParentProcessId } else { $null }); ' +
+    'CommandLine = $(if ($null -ne $detail) { $detail.CommandLine } else { $null }); ' +
+    'MainWindowTitle = $_.MainWindowTitle; StartTimeUtcFileTime = $_.StartTime.ToUniversalTime().ToFileTimeUtc().ToString() } })',
+  'ConvertTo-Json -InputObject $processes -Compress',
+].join('; ');
+
+export function parseWindowsStudioProcessTree(output: string): StudioProcessNode[] {
+  const parsed: unknown = JSON.parse(output);
+  const entries: unknown[] = Array.isArray(parsed) ? parsed : [parsed];
+  return entries.map((value) => {
+    if (
+      value === null || typeof value !== 'object' ||
+      !('Id' in value) || typeof value.Id !== 'number' || !Number.isSafeInteger(value.Id) || value.Id <= 0 ||
+      !('StartTimeUtcFileTime' in value) || typeof value.StartTimeUtcFileTime !== 'string' ||
+      !/^[1-9]\d*$/u.test(value.StartTimeUtcFileTime)
+    ) {
+      throw new Error('Malformed Roblox Studio process tree result.');
+    }
+    const node: StudioProcessNode = { Id: value.Id, StartTimeUtcFileTime: value.StartTimeUtcFileTime };
+    if ('ParentId' in value && typeof value.ParentId === 'number' && Number.isSafeInteger(value.ParentId)) node.ParentId = value.ParentId;
+    if ('CommandLine' in value && typeof value.CommandLine === 'string') node.CommandLine = value.CommandLine;
+    if ('MainWindowTitle' in value && typeof value.MainWindowTitle === 'string') node.MainWindowTitle = value.MainWindowTitle;
+    return node;
+  });
+}
+
+/**
+ * Studio processes with parent PIDs and command lines. Only Windows reports
+ * them (natively or from WSL); Wine detaches each new process from its parent.
+ */
+export async function observeStudioProcessTree(timeoutMs = 15000): Promise<StudioProcessTreeSnapshot> {
+  if (process.platform !== 'win32' && !isWsl()) {
+    return { status: 'unavailable', reason: 'Test windows are tracked by process only on Windows and WSL.' };
+  }
+  const observedAt = Date.now();
+  try {
+    const out = await powershellAsync(WINDOWS_STUDIO_PROCESS_TREE_QUERY, timeoutMs);
+    return { status: 'ok', observedAt, processes: out.trim() === '' ? [] : parseWindowsStudioProcessTree(out) };
+  } catch (error) {
+    return { status: 'error', observedAt, error: error instanceof Error ? error.message : String(error) };
   }
 }
 
@@ -1699,7 +1814,10 @@ export class StudioInstanceManager {
       this.armLaunchCompletionTimer(record);
       await control.authorize();
       record.processAuthorizationState = "authorized";
-      await this.persist(record);
+      // authorize() has just verified the exact PID, creation time and Studio
+      // executable. Record that as the newest observation, so a snapshot taken
+      // while the launch was gated cannot report the process as not running.
+      await this.applyProcessObservation(record, { status: "running", observedAt: Date.now() });
       this.armLaunchCompletionTimer(record);
       return record;
     } catch (error) {
@@ -2210,6 +2328,10 @@ export class StudioInstanceManager {
       }
     }
 
+    // Listing the edit's test windows does not consume the close budget either.
+    const listStarted = Date.now();
+    const testWindows = await this.playtestProcessesOfEdit(processId, record.nativeProcessStartedAt);
+    deadline += Date.now() - listStarted;
     // Never cut an automatic sign-in short (see studio-sign-in.ts). The wait is
     // bounded separately and does not consume the close budget.
     if (!abort) deadline = await this.beforeStudioStop(record.nativeProcessStartedAt, deadline);
@@ -2253,6 +2375,7 @@ export class StudioInstanceManager {
       };
     }
 
+    await this.closeOrphanedPlaytestProcesses(testWindows);
     const closedAt = Date.now();
     record.closedAt = closedAt;
     record.exitedAt = record.exitedAt ?? closedAt;
@@ -2287,9 +2410,155 @@ export class StudioInstanceManager {
           (this.nativeMac() ? ' On macOS only a Studio opened from a local place file (--localPlaceFile) can be closed.' : ''),
       );
     }
+    const listStarted = Date.now();
+    const testWindows = await this.playtestProcessesOfEdit(process.Id, process.StartTimeUtcFileTime);
+    deadline += Date.now() - listStarted;
     deadline = await this.beforeStudioStop(process.StartTimeUtcFileTime, deadline);
     await this.closeProcess(process.Id, process.StartTimeUtcFileTime, undefined, deadline, this.nativeMac());
     if (this.nativeMac()) removePlaceLock(localPlaceFileOf(process.CommandLine ?? process.Path));
+    await this.closeOrphanedPlaytestProcesses(testWindows);
+  }
+
+  /**
+   * The test windows (multiplayer Server and clients) of the edit Studio behind
+   * a connected instance, found by process rather than by connected plugins: a
+   * window whose plugin is still loading, or never connects, is listed too.
+   */
+  async listPlaytestProcesses(instance: ConnectedStudioInstance): Promise<PlaytestProcessListing> {
+    const snapshot = await this.readProcessTreeSnapshot();
+    if (snapshot.status === 'unavailable') return snapshot;
+    if (snapshot.status === 'error') {
+      return { status: 'error', error: `Could not list Studio processes: ${snapshot.error}` };
+    }
+    const edit = await this.findEditProcessNode(instance, snapshot.processes);
+    if ('reason' in edit) return { status: 'unavailable', reason: edit.reason };
+    return { status: 'ok', editProcessId: edit.Id, processes: findPlaytestProcesses(edit, snapshot.processes) };
+  }
+
+  /** Ends each listed test window by exact identity and verifies that it exited. */
+  async closePlaytestProcesses(
+    processes: PlaytestProcess[],
+    timeoutMs = this.closeTimeoutMs,
+  ): Promise<PlaytestProcessCloseResult> {
+    if (processes.length === 0) return { closed: [], remaining: [] };
+    let deadline = Date.now() + timeoutMs;
+    const settleSignIn = this.settleSignIn;
+    if (settleSignIn) {
+      // Test windows do not sign in, so this costs a log scan; never cut a sign-in short anyway.
+      const waitStarted = Date.now();
+      await Promise.all(processes.map((entry) => settleSignIn(entry.startedAt).catch((error: unknown) => {
+        console.error(`[studio] Could not check Studio sign-in before closing: ${error instanceof Error ? error.message : String(error)}`);
+      })));
+      deadline += Date.now() - waitStarted;
+    }
+
+    this.cachedSnapshot = undefined;
+    const stopErrors: string[] = [];
+    if (this.processAdapter.stopProcess) {
+      for (const entry of processes) {
+        try {
+          await this.processAdapter.stopProcess(entry.pid, entry.startedAt);
+        } catch (error) {
+          stopErrors.push(`${entry.pid}: ${error instanceof Error ? error.message : String(error)}`);
+        }
+      }
+    } else if (process.platform === 'win32' || isWsl()) {
+      try {
+        await powershellAsync(buildWindowsStudioStopManyScript(processes), Math.max(1, deadline - Date.now()));
+      } catch (error) {
+        stopErrors.push(error instanceof Error ? error.message : String(error));
+      }
+    } else {
+      return { closed: [], remaining: processes, error: 'Test windows can be closed by process only on Windows and WSL.' };
+    }
+
+    for (;;) {
+      // A stop that used most of the budget still leaves verification time to answer.
+      const snapshot = await this.readProcessTreeSnapshot(Math.max(5000, deadline - Date.now()));
+      if (snapshot.status !== 'ok') {
+        return {
+          closed: [],
+          remaining: processes,
+          error: `Could not verify that test windows exited: ${snapshot.status === 'error' ? snapshot.error : snapshot.reason}`,
+        };
+      }
+      const remaining = processes.filter((entry) => snapshot.processes.some((node) =>
+        node.Id === entry.pid && node.StartTimeUtcFileTime === entry.startedAt));
+      if (remaining.length === 0 || Date.now() >= deadline) {
+        return {
+          closed: processes.filter((entry) => !remaining.includes(entry)),
+          remaining,
+          ...(remaining.length > 0 ? {
+            error: stopErrors.length > 0
+              ? `Could not close test windows: ${stopErrors.join('; ')}`
+              : `Timed out closing test windows ${remaining.map((entry) => entry.pid).join(', ')}.`,
+          } : {}),
+        };
+      }
+      await delay(Math.min(250, Math.max(1, deadline - Date.now())));
+    }
+  }
+
+  // The test windows of one exact edit Studio process; empty when they cannot be listed.
+  private async playtestProcessesOfEdit(processId: number, startedAt: string | undefined): Promise<PlaytestProcess[]> {
+    // Without its creation time a PID (perhaps a WSL spawn PID) names no exact Windows process.
+    if (startedAt === undefined) return [];
+    const snapshot = await this.readProcessTreeSnapshot();
+    if (snapshot.status !== 'ok') return [];
+    const edit = snapshot.processes.find((node) => node.Id === processId && node.StartTimeUtcFileTime === startedAt);
+    return edit ? findPlaytestProcesses(edit, snapshot.processes) : [];
+  }
+
+  // Closing an edit Studio does not end the test windows it started.
+  private async closeOrphanedPlaytestProcesses(processes: PlaytestProcess[]): Promise<void> {
+    if (processes.length === 0) return;
+    const result = await this.closePlaytestProcesses(processes);
+    if (result.error) console.error(`[studio] ${result.error}`);
+  }
+
+  private async findEditProcessNode(
+    instance: ConnectedStudioInstance,
+    processes: StudioProcessNode[],
+  ): Promise<StudioProcessNode | { reason: string }> {
+    const record = this.managedByInstanceId.get(instance.instanceId) ?? await (async () => {
+      const registryRecord = await this.registry.findAnyByInstanceId(instance.instanceId);
+      return registryRecord ? this.fromRegistryRecord(registryRecord) : undefined;
+    })();
+    if (record && record.closedAt === undefined && record.nativeProcessId !== undefined) {
+      if (record.nativeProcessStartedAt === undefined) {
+        return { reason: 'The managed edit Studio has no recorded process creation time.' };
+      }
+      const edit = processes.find((node) => node.Id === record.nativeProcessId &&
+        node.StartTimeUtcFileTime === record.nativeProcessStartedAt);
+      return edit ?? { reason: 'The managed edit Studio process is not running.' };
+    }
+    const edits = processes.filter((node) => playtestProcessRole(node.CommandLine) === undefined);
+    let match: StudioProcessInfo | undefined;
+    try {
+      // Only a window title names this edit: a sole local Studio could be
+      // another machine's, when the bridge accepts remote plugins.
+      match = this.findProcessForConnectedInstance(instance, edits, { requireTitleMatch: true });
+    } catch (error) {
+      return { reason: error instanceof Error ? error.message : String(error) };
+    }
+    const edit = match === undefined ? undefined : edits.find((node) => node.Id === match.Id);
+    return edit ?? { reason: `Could not find the edit Studio process for connected instance "${instance.instanceId}".` };
+  }
+
+  private async readProcessTreeSnapshot(timeoutMs = 15000): Promise<StudioProcessTreeSnapshot> {
+    try {
+      if (this.processAdapter.observeStudioProcessTree) return await this.processAdapter.observeStudioProcessTree();
+      // A custom adapter owns process observation; never read the real host behind it.
+      if (this.processAdapter.observeStudioProcesses || this.processAdapter.listStudioProcesses) {
+        return { status: 'unavailable', reason: 'The configured Studio process adapter does not report parent processes.' };
+      }
+      if (/^(0|off|false)$/iu.test(process.env.ROBLOX_STUDIO_TEST_WINDOW_CLEANUP ?? '')) {
+        return { status: 'unavailable', reason: 'Test window tracking is turned off (ROBLOX_STUDIO_TEST_WINDOW_CLEANUP).' };
+      }
+      return await observeStudioProcessTree(Math.max(1, timeoutMs));
+    } catch (error) {
+      return { status: 'error', observedAt: Date.now(), error: error instanceof Error ? error.message : String(error) };
+    }
   }
 
   private async beforeStudioStop(startedAt: string | undefined, deadline: number): Promise<number> {
@@ -2407,10 +2676,11 @@ export class StudioInstanceManager {
   private findProcessForConnectedInstance(
     instance: ConnectedStudioInstance,
     processes: StudioProcessInfo[],
+    { requireTitleMatch = false }: { requireTitleMatch?: boolean } = {},
   ): StudioProcessInfo | undefined {
     if (this.nativeMac()) return findMacProcessForConnectedInstance(instance, processes);
     if (processes.length === 0) return undefined;
-    if (processes.length === 1) return processes[0];
+    if (processes.length === 1 && !requireTitleMatch) return processes[0];
 
     const names = [instance.dataModelName, instance.placeName]
       .map((name) => name.trim())
@@ -2588,6 +2858,20 @@ export class StudioInstanceManager {
     if (!processId) return { status: 'running', observedAt: snapshot.observedAt };
     const studioProcess = snapshot.processes.find((candidate) => candidate.Id === processId);
     if (!studioProcess) {
+      // Until authorization execs Studio in it, a Wine launch is a gate shell
+      // that Studio enumeration never lists, so its absence there is no
+      // evidence of an exit. Check the gate itself instead: it can die before
+      // the exit listener is attached, so the listener alone is not enough.
+      if (
+        record.processAuthorizationState === 'pending' &&
+        record.recordId !== undefined &&
+        this.launchControls.has(record.recordId) &&
+        this.getLifecycleCapabilities().processIdentity.launcher === 'wine-retained' &&
+        record.nativeProcessStartedAt !== undefined &&
+        readWineProcessStartTime(processId) === record.nativeProcessStartedAt
+      ) {
+        return { status: 'running', observedAt: snapshot.observedAt };
+      }
       if (process.platform === 'darwin' &&
           !this.processAdapter.observeStudioProcesses && !this.processAdapter.listStudioProcesses) {
         const observation = observePosixProcess(processId);

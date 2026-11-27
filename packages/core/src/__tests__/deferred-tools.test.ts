@@ -28,7 +28,8 @@ describe('deferred tools', () => {
     const listed = getAllTools().filter((tool) => !DEFERRED_TOOLS.has(tool.name)).map(publicToolDefinition);
     expect(listed).toHaveLength(29);
     // Under half the full catalog: 26,213 characters of 54,979 when deferral went in.
-    expect(JSON.stringify(listed).length).toBeLessThanOrEqual(26_500);
+    // 27,600 after upstream 3.6.0: wait_until, timeout_s and poll_ms on the evals, ready_timeout_s, frames.
+    expect(JSON.stringify(listed).length).toBeLessThanOrEqual(27_600);
   });
 
   test('more_tools lists them, enables by name, and the next server keeps them enabled', async () => {

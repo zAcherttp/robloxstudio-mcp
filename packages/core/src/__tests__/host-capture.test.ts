@@ -1,15 +1,20 @@
 import {
   cropToViewport,
   findViewportRect,
-  hostCaptureUnsupportedReason,
+  hostEnvironment,
   isHostCaptureDisabled,
+  isHostCapturePreferred,
   isHostCaptureSupported,
+  hostCaptureUnsupportedReason,
   isUniformFrame,
   matchesStudioTitle,
   pickStudioWindow,
+  saveViewportMarkerFrame,
+  windowsCaptureEnvironment,
 } from '../host-capture.js';
 import { decodeScreenshotPngToRgba } from '../image-decode.js';
 import type { HostCaptureResult } from '../host-capture.js';
+import { LINUX_NO_STUDIO_DISPLAY_ERROR } from '../host-capture-linux.js';
 import * as hostCaptureModule from '../host-capture.js';
 import { BridgeService } from '../bridge-service.js';
 import { RobloxStudioTools } from '../tools/index.js';
@@ -18,6 +23,9 @@ import { StudioHttpClient } from '../tools/studio-client.js';
 import { StudioInstanceManager } from '../studio-instance-manager.js';
 import { rgbaToPng } from '../png-encoder.js';
 import { decodePngToRgba } from '../image-decode.js';
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
 
 function solid(width: number, height: number, rgb: [number, number, number]): Buffer {
   const rgba = Buffer.alloc(width * height * 4);
@@ -94,6 +102,11 @@ describe('isUniformFrame', () => {
   });
 });
 
+function errorOf(result: { rect: unknown } | { error: string }): string {
+  if (!('error' in result)) throw new Error(`expected an error, got ${JSON.stringify(result)}`);
+  return result.error;
+}
+
 describe('findViewportRect', () => {
   const hint = { viewportWidth: 300, viewportHeight: 120, markerSize: 12 };
 
@@ -118,15 +131,127 @@ describe('findViewportRect', () => {
     expect(findViewportRect(rgba, 400, 200, hint)).toEqual({ error: expect.stringContaining('no viewport markers') });
   });
 
-  test('rejects a box stretched by stray magenta in Studio chrome', () => {
+  test('ignores stray magenta in Studio chrome outside the viewport', () => {
     const rgba = studioWindow(400, 200, { x: 50, y: 30, width: 300, height: 120 }, true);
     fill(rgba, 400, 5, 180, 3, 3, [255, 0, 255]);
-    expect(findViewportRect(rgba, 400, 200, hint)).toEqual({ error: expect.stringContaining('do not form a rectangle') });
+    expect(findViewportRect(rgba, 400, 200, hint)).toEqual({ rect: { x: 50, y: 30, width: 300, height: 120 } });
+  });
+
+  test('ignores a thin marker-coloured strip next to the four markers (iPad Fit to Window)', () => {
+    const viewport = { x: 20, y: 40, width: 1180, height: 820 };
+    const rgba = studioWindow(1220, 1030, viewport, true);
+    fill(rgba, 1220, 604, 264, 3, 756, [255, 0, 255]);
+    expect(findViewportRect(rgba, 1220, 1030, { viewportWidth: 1180, viewportHeight: 820, markerSize: 12 })).toEqual({ rect: viewport });
+  });
+
+  test('accepts markers merged with magenta game UI at a corner, as before', () => {
+    const rgba = studioWindow(400, 200, { x: 50, y: 30, width: 300, height: 120 }, true);
+    fill(rgba, 400, 50, 30, 80, 12, [255, 0, 255]);
+    expect(findViewportRect(rgba, 400, 200, hint)).toEqual({ rect: { x: 50, y: 30, width: 300, height: 120 } });
+  });
+
+  test('reports what it saw when only a strip of marker colour is in the frame', () => {
+    const rgba = studioWindow(1220, 1030, { x: 20, y: 40, width: 1180, height: 820 }, false);
+    fill(rgba, 1220, 604, 264, 3, 756, [255, 0, 255]);
+    const error = errorOf(findViewportRect(rgba, 1220, 1030, { viewportWidth: 1180, viewportHeight: 820, markerSize: 12 }));
+    expect(error).toContain('do not form a rectangle');
+    expect(error).toContain('2268 marker pixels in 1 blob (3x756 at 604,264), 0 marker-shaped');
+    expect(error).toContain('expected four 12 px squares at the corners of the 1180x820 viewport');
+  });
+
+  test('lists a bounded number of blobs in the failure', () => {
+    const rgba = solid(400, 200, [60, 60, 60]);
+    for (let i = 0; i < 12; i++) fill(rgba, 400, 10 + i * 30, 10, 1, 20, [255, 0, 255]);
+    const error = errorOf(findViewportRect(rgba, 400, 200, hint));
+    expect(error).toContain('240 marker pixels in 12 blobs (');
+    expect(error.match(/1x20 at/g)).toHaveLength(8);
+    expect(error).toContain(', ...)');
   });
 
   test('rejects a box whose aspect does not match the reported viewport', () => {
     const rgba = studioWindow(400, 200, { x: 50, y: 30, width: 300, height: 120 }, true);
     expect(findViewportRect(rgba, 400, 200, { ...hint, viewportHeight: 60 })).toEqual({ error: expect.stringContaining('aspect') });
+  });
+});
+
+// The plugin's current layout: squares centred on each viewport edge.
+function edgeMarkers(rgba: Buffer, width: number, viewport: { x: number; y: number; width: number; height: number }, size: number): void {
+  const magenta: [number, number, number] = [255, 0, 255];
+  const midX = viewport.x + Math.round((viewport.width - size) / 2);
+  const midY = viewport.y + Math.round((viewport.height - size) / 2);
+  fill(rgba, width, viewport.x, midY, size, size, magenta);
+  fill(rgba, width, viewport.x + viewport.width - size, midY, size, size, magenta);
+  fill(rgba, width, midX, viewport.y, size, size, magenta);
+  fill(rgba, width, midX, viewport.y + viewport.height - size, size, size, magenta);
+}
+
+describe('findViewportRect with edge markers', () => {
+  test('locates the viewport from markers centred on its edges', () => {
+    const viewport = { x: 50, y: 30, width: 301, height: 121 };
+    const rgba = studioWindow(400, 200, viewport, false);
+    edgeMarkers(rgba, 400, viewport, 12);
+    expect(findViewportRect(rgba, 400, 200, { viewportWidth: 301, viewportHeight: 121, markerSize: 12, markerLayout: 'edges' }))
+      .toEqual({ rect: viewport });
+  });
+
+  test('finds a Fit to Window iPad viewport whose rounded screen hides the corners (#183)', () => {
+    // Live frame: 1179x819 viewport drawn at about 0.64 scale inside a device
+    // frame whose rounded screen corners leave only 3x3 slivers of corner colour.
+    const viewport = { x: 162, y: 238, width: 760, height: 528 };
+    const rgba = studioWindow(1280, 891, viewport, false);
+    edgeMarkers(rgba, 1280, viewport, 8);
+    fill(rgba, 1280, 167, 243, 3, 3, [255, 0, 255]);
+    fill(rgba, 1280, 167, 761, 3, 3, [255, 0, 255]);
+    expect(findViewportRect(rgba, 1280, 891, { viewportWidth: 1179, viewportHeight: 819, markerSize: 12, markerLayout: 'edges' }))
+      .toEqual({ rect: viewport });
+  });
+
+  test('ignores magenta game UI that lines up with one pair of markers', () => {
+    const viewport = { x: 50, y: 30, width: 300, height: 120 };
+    const rgba = studioWindow(400, 200, viewport, false);
+    edgeMarkers(rgba, 400, viewport, 12);
+    fill(rgba, 400, 120, 84, 12, 12, [255, 0, 255]);
+    expect(findViewportRect(rgba, 400, 200, { viewportWidth: 300, viewportHeight: 120, markerSize: 12, markerLayout: 'edges' }))
+      .toEqual({ rect: viewport });
+  });
+
+  test('says where it expected the markers when only corner squares are visible', () => {
+    const rgba = studioWindow(400, 200, { x: 50, y: 30, width: 300, height: 120 }, true);
+    const error = errorOf(findViewportRect(rgba, 400, 200, { viewportWidth: 300, viewportHeight: 120, markerSize: 12, markerLayout: 'edges' }));
+    expect(error).toContain('expected four 12 px squares at the middle of the edges of the 300x120 viewport');
+  });
+});
+
+describe('saveViewportMarkerFrame', () => {
+  let directory: string;
+
+  beforeEach(() => {
+    directory = fs.mkdtempSync(path.join(os.tmpdir(), 'viewport-markers-test-'));
+  });
+
+  afterEach(() => {
+    fs.rmSync(directory, { recursive: true, force: true });
+  });
+
+  test('saves an opaque PNG of the frame and keeps only the newest few', () => {
+    const rgba = solid(4, 2, [255, 0, 255]);
+    for (let i = 3; i < rgba.length; i += 4) rgba[i] = 0;
+    const saved: string[] = [];
+    for (let i = 0; i < 4; i++) saved.push(saveViewportMarkerFrame(rgba, 4, 2, 'gfx:capture', directory, 2)!);
+    expect(path.dirname(saved[3])).toBe(directory);
+    expect(path.basename(saved[3])).toMatch(/^viewport-markers-.*-gfxcapture-[a-z0-9]+\.png$/);
+    expect(fs.readdirSync(directory)).toHaveLength(2);
+    expect(fs.existsSync(saved[3])).toBe(true);
+    const decoded = decodePngToRgba(fs.readFileSync(saved[3]));
+    expect(decoded.width).toBe(4);
+    expect(decoded.rgba[3]).toBe(255);
+    expect(decoded.rgba[0]).toBe(255);
+  });
+
+  test('returns undefined instead of throwing when the directory is unusable', () => {
+    const blocker = path.join(directory, 'file');
+    fs.writeFileSync(blocker, '');
+    expect(saveViewportMarkerFrame(solid(2, 2, [0, 0, 0]), 2, 2, 'window', blocker)).toBeUndefined();
   });
 });
 
@@ -179,11 +304,40 @@ describe('isHostCaptureDisabled', () => {
   });
 });
 
+describe('host capture on WSL', () => {
+  afterEach(() => jest.restoreAllMocks());
+
+  test('is supported on WSL with Windows interop and on native Linux (X11), where only native Linux prefers it', () => {
+    jest.spyOn(hostEnvironment, 'detectWslWindowsHost').mockReturnValue(true);
+    expect(isHostCaptureSupported('linux')).toBe(true);
+    expect(isHostCapturePreferred('linux', {})).toBe(false);
+    jest.spyOn(hostEnvironment, 'detectWslWindowsHost').mockReturnValue(false);
+    const studioDisplay = jest.spyOn(hostEnvironment, 'hasLinuxStudioDisplay').mockReturnValue(true);
+    expect(isHostCaptureSupported('linux')).toBe(true);
+    expect(isHostCapturePreferred('linux', {})).toBe(true);
+    // Without a Studio on an X display, Studio's own capture stays first.
+    studioDisplay.mockReturnValue(false);
+    expect(isHostCapturePreferred('linux', {})).toBe(false);
+    expect(isHostCaptureSupported('win32')).toBe(true);
+  });
+
+  test('forwards the helper inputs to powershell.exe through WSLENV', () => {
+    const identity = { windowId: 5, processId: 6, bundleIdentifier: 'RobloxStudioBeta' };
+    const env = windowsCaptureEnvironment('Place', '/tmp/frame.bgra', identity, true, { WSLENV: 'ORCA_X/u', PATH: '/usr/bin' });
+    expect(env.WSLENV).toBe('ORCA_X/u:MCP_CAPTURE_TITLE_HINT/w:MCP_CAPTURE_OUT/pw:MCP_CAPTURE_EXPECTED_IDENTITY/w');
+    expect(env).toMatchObject({ MCP_CAPTURE_TITLE_HINT: 'Place', MCP_CAPTURE_OUT: '/tmp/frame.bgra', PATH: '/usr/bin' });
+    expect(windowsCaptureEnvironment('Place', 'C:\\t.bgra', undefined, false, {}).WSLENV).toBeUndefined();
+  });
+});
+
 describe('capture_screenshot host window fallback', () => {
   const platformDescriptor = Object.getOwnPropertyDescriptor(process, 'platform')!;
   beforeEach(() => {
     // Exercise the supported fallback independently of the test runner's OS.
     Object.defineProperty(process, 'platform', { value: 'win32' });
+    // A 'linux' platform means native Linux here, even when the runner is WSL.
+    jest.spyOn(hostEnvironment, 'detectWslWindowsHost').mockReturnValue(false);
+    jest.spyOn(hostEnvironment, 'hasLinuxStudioDisplay').mockReturnValue(true);
     jest.replaceProperty(process, 'env', { ...process.env, ROBLOX_STUDIO_HOST_CAPTURE: '1' });
     // Capture tests use synthetic peers, never the user's managed Studio state.
     jest.spyOn(StudioInstanceManager.prototype, 'pendingLaunches').mockResolvedValue([]);
@@ -241,15 +395,22 @@ describe('capture_screenshot host window fallback', () => {
     return { tools, request };
   }
 
-  test.each(['linux', 'disabled'] as const)('does not prepare markers or scaling when host capture is %s', async (mode) => {
+  // 'linux' is native Linux with no Studio on an X display (a container, a
+  // remote server, WSL whose interop detection failed).
+  test.each(['linux', 'freebsd', 'disabled'] as const)('does not prepare markers or scaling when host capture is %s', async (mode) => {
     if (mode === 'disabled') process.env.ROBLOX_STUDIO_HOST_CAPTURE = '0';
     else Object.defineProperty(process, 'platform', { value: mode });
+    if (mode === 'linux') jest.spyOn(hostEnvironment, 'hasLinuxStudioDisplay').mockReturnValue(false);
     const hostCapture = jest.fn(async (): Promise<HostCaptureResult> => ({ ok: false, error: 'must not run' }));
     const { tools, request } = makeTools(hostCapture, studioThatReturnsBlackPlayFrames({ shown: false }));
 
     const result = await tools.captureScreenshot('instance:test', 'png');
     const text = JSON.parse((result.content[0] as { text: string }).text);
-    expect(text.message).toContain(mode === 'disabled' ? 'disabled by ROBLOX_STUDIO_HOST_CAPTURE' : hostCaptureUnsupportedReason(mode));
+    expect(text.message).toContain({
+      linux: LINUX_NO_STUDIO_DISPLAY_ERROR,
+      freebsd: hostCaptureUnsupportedReason('freebsd'),
+      disabled: 'disabled by ROBLOX_STUDIO_HOST_CAPTURE',
+    }[mode]);
     expect(text.message).toContain('may be blank');
     expect(text.source).toBe('CaptureService');
     expect(text.studioFastPathUnavailable).toBe('StudioCaptureService cannot capture this DataModel right now');
@@ -334,7 +495,7 @@ describe('capture_screenshot host window fallback', () => {
   });
 
   test('preserves a capture-begin error and fast-path reason when host capture is unsupported', async () => {
-    Object.defineProperty(process, 'platform', { value: 'linux' });
+    Object.defineProperty(process, 'platform', { value: 'freebsd' });
     const hostCapture = jest.fn(async (): Promise<HostCaptureResult> => ({ ok: false, error: 'must not run' }));
     const { tools, request } = makeTools(hostCapture, async (endpoint) => {
       if (endpoint === '/api/capture-studio') return { unavailable: 'Client capture unavailable' };
@@ -344,7 +505,7 @@ describe('capture_screenshot host window fallback', () => {
     const result = await tools.captureScreenshot('instance:test', 'png');
     const text = JSON.parse((result.content[0] as { text: string }).text);
     expect(text.error).toContain('Screenshot callback timed out');
-    expect(text.error).toContain(hostCaptureUnsupportedReason('linux'));
+    expect(text.error).toContain(hostCaptureUnsupportedReason('freebsd'));
     expect(text.studioFastPathUnavailable).toBe('Client capture unavailable');
     expect(hostCapture).not.toHaveBeenCalled();
     expect(request.mock.calls.some(([endpoint]) => endpoint === '/api/capture-markers')).toBe(false);
@@ -379,6 +540,31 @@ describe('capture_screenshot host window fallback', () => {
     for (const call of request.mock.calls.filter(([endpoint]) => endpoint === '/api/capture-markers')) {
       expect(call[2]).toBe('client-session');
     }
+  });
+
+  test('on Linux grabs the window of a Studio missing from the registry, then goes host-first', async () => {
+    Object.defineProperty(process, 'platform', { value: 'linux' });
+    jest.spyOn(StudioInstanceManager.prototype, 'get').mockResolvedValue(undefined);
+    const markerState = { shown: false };
+    const hintedProcessIds: Array<number | undefined> = [];
+    const hostCapture: HostWindowCaptureFn = async (_titleHint, _identity, options) => {
+      hintedProcessIds.push(options?.processId);
+      return { ok: true, capture: { width: 400, height: 200, title: 't', identity: windowIdentity, rgba: studioWindow(400, 200, viewport, markerState.shown) } };
+    };
+    const { tools, request } = makeTools(hostCapture, studioThatReturnsBlackPlayFrames(markerState));
+    const capture = async () => {
+      const [summary] = (await tools.captureScreenshot('instance:test', 'png')).content;
+      if (!('text' in summary) || typeof summary.text !== 'string') throw new Error('Expected a text summary');
+      return JSON.parse(summary.text);
+    };
+
+    expect(await capture()).toMatchObject({ source: 'host-window', width: 300, height: 120, studioFastPathUnavailable: 'StudioCaptureService cannot capture this DataModel right now' });
+    expect(request.mock.calls.map(([endpoint]) => endpoint)).not.toContain('/api/capture-begin');
+
+    request.mockClear();
+    expect((await capture()).source).toBe('host-window');
+    expect(request.mock.calls.map(([endpoint]) => endpoint)).not.toContain('/api/capture-studio');
+    expect(hintedProcessIds.at(-1)).toBe(windowIdentity.processId);
   });
 
   test('replaces a successful but black StudioCaptureService PNG with the host viewport', async () => {
@@ -423,6 +609,111 @@ describe('capture_screenshot host window fallback', () => {
     const image = result.content.find((item) => 'data' in item);
     expect(image && 'data' in image && image.data).toBe(png);
     expect(hostCapture).not.toHaveBeenCalled();
+  });
+
+  describe('Device Simulator screenshots are resampled to the full device screen', () => {
+    // iphone_14 LandscapeRight: the 843x388 device screen, a 749x388 safe-area
+    // viewport, and a full-screen x of 666 that a click must hit.
+    const SCREEN = { screenWidth: 843, screenHeight: 388 };
+    const TARGET_X = 666;
+
+    // A 3px white column at the target, drawn into an image whose x axis
+    // spans the whole device screen at the given width.
+    function frameWithTarget(width: number, height: number): Buffer {
+      const rgba = solid(width, height, [0, 0, 0]);
+      fill(rgba, width, Math.round(TARGET_X * width / 843) - 1, 0, 3, height, [255, 255, 255]);
+      return rgba;
+    }
+
+    function brightestColumn(rgba: Buffer, width: number, row: number): number {
+      let best = 0;
+      for (let x = 1; x < width; x++) {
+        if (rgba[(row * width + x) * 4] > rgba[(row * width + best) * 4]) best = x;
+      }
+      return best;
+    }
+
+    async function shoot(requestImpl: (endpoint: string, data: unknown) => Promise<unknown>) {
+      const hostCapture = jest.fn(async (): Promise<HostCaptureResult> => ({ ok: false, error: 'should not be called' }));
+      const { tools } = makeTools(hostCapture, requestImpl);
+      const result = await tools.captureScreenshot('instance:test', 'png');
+      const text = JSON.parse((result.content[0] as { text: string }).text);
+      const image = result.content.find((item) => 'data' in item);
+      if (!image || !('data' in image) || typeof image.data !== 'string') throw new Error(`no image: ${JSON.stringify(text)}`);
+      return { text, image: decodePngToRgba(Buffer.from(image.data, 'base64')), hostCapture };
+    }
+
+    test.each(['rgba8', 'png'] as const)('StudioCaptureService squeezed %s frame', async (encoding) => {
+      const rgba = frameWithTarget(749, 388);
+      const data = encoding === 'png' ? rgbaToPng(rgba, 749, 388).toString('base64') : rgba.toString('base64');
+      const { text, image } = await shoot(async () => ({
+        success: true, encoding, source: 'StudioCaptureService', width: 749, height: 388,
+        nativeWidth: 749, nativeHeight: 388, data, ...SCREEN,
+      }));
+
+      expect([image.width, image.height, text.width, text.height]).toEqual([843, 388, 843, 388]);
+      expect(Math.abs(brightestColumn(image.rgba, 843, 200) - TARGET_X)).toBeLessThanOrEqual(1);
+      expect(text.message).toContain('use coordinates as you read them off the image');
+      expect(text.message).toContain('covers the full 843x388 device screen');
+    });
+
+    test('CaptureService play-client frame takes the screen size from capture-begin', async () => {
+      const rgba = frameWithTarget(605, 279);
+      const { text, image } = await shoot(async (endpoint) => {
+        if (endpoint === '/api/capture-studio') return { unavailable: 'StudioCaptureService cannot capture this DataModel right now' };
+        if (endpoint === '/api/capture-begin') return { contentId: 'rbxtemp://1', ...SCREEN };
+        if (endpoint === '/api/capture-read') {
+          return { success: true, encoding: 'rgba8', width: 605, height: 279, nativeWidth: 605, nativeHeight: 279, data: rgba.toString('base64') };
+        }
+        throw new Error(`unexpected endpoint ${endpoint}`);
+      });
+
+      expect([image.width, image.height]).toEqual([843, 388]);
+      expect(Math.abs(brightestColumn(image.rgba, 843, 200) - TARGET_X)).toBeLessThanOrEqual(1);
+      expect(text.source).toBe('CaptureService');
+      expect(text.message).toContain('covers the full 843x388 device screen');
+    });
+
+    test('a plugin-side transport downscale is kept in proportion to the screen', async () => {
+      const { text, image } = await shoot(async () => ({
+        success: true, encoding: 'rgba8', source: 'StudioCaptureService', width: 600, height: 311,
+        nativeWidth: 749, nativeHeight: 388, data: frameWithTarget(600, 311).toString('base64'), ...SCREEN,
+      }));
+
+      expect([image.width, image.height]).toEqual([675, 311]);
+      expect(text.message).toContain('of the 843x388 viewport');
+      expect(text.message).toContain(`multiplies x by ${(843 / 675).toFixed(4)}`);
+    });
+
+    test('a capture without screen fields is untouched', async () => {
+      const rgba = frameWithTarget(749, 388);
+      const { text, image } = await shoot(async () => ({
+        success: true, encoding: 'rgba8', source: 'StudioCaptureService', width: 749, height: 388,
+        nativeWidth: 749, nativeHeight: 388, data: rgba.toString('base64'),
+      }));
+
+      expect([image.width, image.height]).toEqual([749, 388]);
+      expect(image.rgba.equals(rgba)).toBe(true);
+      expect(text.message).not.toContain('Device Simulator');
+    });
+
+    test('a host-window fallback image is untouched', async () => {
+      const markerState = { shown: false };
+      const studio = studioThatReturnsBlackPlayFrames(markerState);
+      const hostCapture: HostWindowCaptureFn = async () => ({
+        ok: true, capture: { width: 400, height: 200, title: 'TestPlace - Roblox Studio', rgba: studioWindow(400, 200, viewport, markerState.shown) },
+      });
+      const { tools } = makeTools(hostCapture, async (endpoint, data) => {
+        if (endpoint === '/api/capture-begin') return { contentId: 'rbxtemp://1', ...SCREEN };
+        return studio(endpoint, data);
+      });
+
+      const result = await tools.captureScreenshot('instance:test', 'png');
+      const text = JSON.parse((result.content[0] as { text: string }).text);
+      expect([text.width, text.height]).toEqual([300, 120]);
+      expect(text.message).toContain('Captured from the Studio window through the host OS');
+      expect(text.message).not.toContain('Device Simulator');
+    });
   });
 
   test('preserves a healthy 5K PNG above the asset decoder pixel limit', async () => {
@@ -627,7 +918,7 @@ describe('capture_screenshot host window fallback', () => {
     const second = await tools.captureScreenshot('instance:test', 'png');
     expect(JSON.parse((second.content[0] as { text: string }).text).source).toBe('host-window');
     expect(hostCapture.mock.calls).toEqual([
-      ['TestPlace'], ['TestPlace', windowIdentity], ['TestPlace', windowIdentity],
+      ['TestPlace', undefined, { accept: expect.any(Function) }], ['TestPlace', windowIdentity, {}], ['TestPlace', windowIdentity, {}],
     ]);
     expect(request.mock.calls.filter(([endpoint]) => endpoint === '/api/capture-markers')
       .map(([, data]) => (data as { action: string }).action)).toEqual(['prepare', 'query', 'finish']);
@@ -656,7 +947,7 @@ describe('capture_screenshot host window fallback', () => {
     expect(text.source).toBe('CaptureService');
     expect(text.message).toContain('window identity changed');
     expect(text.message).toContain('may be blank');
-    expect(hostCapture.mock.calls[mismatchAt - 1]).toEqual(['TestPlace', windowIdentity]);
+    expect(hostCapture.mock.calls[mismatchAt - 1]).toEqual(['TestPlace', windowIdentity, {}]);
     expect(markerState.shown).toBe(false);
     const image = result.content.find((item) => 'data' in item);
     if (!image || !('data' in image) || typeof image.data !== 'string') throw new Error('Expected original blank frame');
@@ -666,7 +957,7 @@ describe('capture_screenshot host window fallback', () => {
     request.mockClear();
     const retry = await tools.captureScreenshot('instance:test', 'png');
     expect(JSON.parse((retry.content[0] as { text: string }).text).source).toBe('host-window');
-    expect(hostCapture.mock.calls[mismatchAt]).toEqual(['TestPlace']);
+    expect(hostCapture.mock.calls[mismatchAt]).toEqual(['TestPlace', undefined, { accept: expect.any(Function) }]);
     expect(request.mock.calls.filter(([endpoint]) => endpoint === '/api/capture-markers')
       .map(([, data]) => (data as { action: string }).action)).toEqual(['prepare', 'query', 'show', 'hide', 'finish']);
   });
@@ -769,8 +1060,6 @@ describe('macOS host capture', () => {
   it('is supported on macOS as well as Windows', () => {
     expect(isHostCaptureSupported('darwin')).toBe(true);
     expect(isHostCaptureSupported('win32')).toBe(true);
-    expect(isHostCaptureSupported('linux')).toBe(false);
-    expect(hostCaptureUnsupportedReason('linux')).toContain('linux');
   });
 });
 

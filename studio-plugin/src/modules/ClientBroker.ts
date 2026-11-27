@@ -35,6 +35,12 @@ const DEFAULT_MCP_URL = "http://localhost:58741";
 let mcpUrl = DEFAULT_MCP_URL;
 const BROKER_NAME = "__MCPClientBroker";
 const BROKER_OWNER_ATTRIBUTE = "__MCPBrokerOwner";
+// Some games rename every remote in ReplicatedStorage on the client (Pet
+// Simulator X renames each one to its class name), so the client also finds
+// the bridge channels by this attribute, which a rename leaves in place.
+const CHANNEL_ATTRIBUTE = "__MCPChannel";
+const CHANNEL_WAIT_SECONDS = 10;
+const CHANNEL_POLL_SECONDS = 0.1;
 const CLIENT_IDENTITY_KIND = "identity";
 // A normal capture needs at most 15s sampling + 5s waiting for profiler data.
 // Leave room for processing, then return a diagnostic before the outer 30s wait.
@@ -412,9 +418,25 @@ function handleClientInvoke(payload: BrokerEnvelope | undefined): unknown {
 	return result;
 }
 
+function findChannel(name: string): Instance | undefined {
+	const named = ReplicatedStorage.FindFirstChild(name);
+	if (named !== undefined) return named;
+	return ReplicatedStorage.GetChildren().find((child) => child.GetAttribute(CHANNEL_ATTRIBUTE) === name);
+}
+
+function waitForChannel(name: string): Instance | undefined {
+	const deadline = os.clock() + CHANNEL_WAIT_SECONDS;
+	let channel = findChannel(name);
+	while (channel === undefined && os.clock() < deadline) {
+		task.wait(CHANNEL_POLL_SECONDS);
+		channel = findChannel(name);
+	}
+	return channel;
+}
+
 function startClientHeartbeat(attempt = 0): void {
 	if (clientHeartbeatStarted || PeerRole.detect() !== "client" || !RunService.IsRunning()) return;
-	const event = ReplicatedStorage.WaitForChild(HEARTBEAT_NAME, 10);
+	const event = waitForChannel(HEARTBEAT_NAME);
 	if (!event || !event.IsA("RemoteEvent")) {
 		// An older server broker has no heartbeat channel; requests still work.
 		if (RunService.IsRunning() && attempt < 5) {
@@ -451,7 +473,7 @@ function startClientHeartbeat(attempt = 0): void {
 
 function setupClientBroker(attempt = 0) {
 	if (PeerRole.detect() !== "client") return;
-	const rf = ReplicatedStorage.WaitForChild(BROKER_NAME, 10);
+	const rf = waitForChannel(BROKER_NAME);
 	if (!rf || !rf.IsA("RemoteFunction")) {
 		if (attempt === 0) warn(`[robloxstudio-mcp] client: ${BROKER_NAME} not found; retrying`);
 		if (RunService.IsRunning()) {
@@ -750,7 +772,7 @@ function describeBridgeHealth(health: BridgeHealth): string {
 	const channel = `Bridge heartbeat ${seconds(health.heartbeatAgeMs)} ago; client->server delay ${seconds(health.clientToServerDelayMs ?? 0)}` +
 		(health.serverToClientDelayMs !== undefined ? `; server->client delay ${seconds(health.serverToClientDelayMs)}.` : ".");
 	if (health.heartbeatAgeMs > BRIDGE_STALE_SECONDS * 1000) {
-		return `${channel} The client's MCP bridge has stopped sending heartbeats: either the client's Luau scheduler is blocked by a long-running script, or client->server messages are stalled. The game window can keep rendering in both cases.`;
+		return `${channel} The client's MCP bridge has stopped sending heartbeats: either the client's Studio process exited (its window was closed or killed), the client's Luau scheduler is blocked by a long-running script, or client->server messages are stalled. The game window can keep rendering in the last two cases.`;
 	}
 	if (health.requestState === "running") {
 		return `${channel} The client received this request and its handler has been running for ${seconds(health.requestRunningMs ?? 0)}: the code is yielding or blocked inside the client.`;
@@ -797,6 +819,8 @@ interface ClientCall {
 	context: StudioRequestContext;
 	startedAt: number;
 	deadlineAt: number;
+	// Stop waiting once the client's heartbeat goes stale instead of at the deadline.
+	abortOnStaleBridge?: boolean;
 }
 
 type InvokeOutcome = { ok: true; result: unknown } | { ok: false; failure: Record<string, unknown> };
@@ -886,6 +910,19 @@ function invokeClient(
 			entry.player.Parent === undefined || entry.remote.Parent === undefined || !RunService.IsRunning()
 		) {
 			return callFailure(call, "client_broker_disconnected", "client_broker_wait", "unknown", `Client proxy ${call.target} disconnected while awaiting its response.`);
+		}
+		if (call.abortOnStaleBridge) {
+			const health = bridgeHealth(entry, requestId, dispatchedAt);
+			if ((health.heartbeatAgeMs ?? 0) > BRIDGE_STALE_SECONDS * 1000) {
+				return callFailure(
+					call,
+					"client_bridge_unresponsive",
+					"client_broker_wait",
+					"unknown",
+					`${call.target} stopped sending bridge heartbeats while ${endpoint} was waiting.`,
+					health,
+				);
+			}
 		}
 		if (os.clock() >= call.deadlineAt) {
 			entry.lastTimeoutAt = os.clock();
@@ -1016,6 +1053,112 @@ function invokeClientCapture(
 	return result;
 }
 
+const LEAVE_CLIENT_ENDPOINT = "/api/multiplayer-test-leave-client";
+// After a client confirms its leave, a heartbeat gap this long since the later of
+// its last heartbeat and the confirmation means its Studio process has exited.
+// Heartbeats arrive every second; the process exits within about a second.
+const LEAVE_EXIT_SILENCE_SECONDS = 3;
+// How long the server watches a confirmed leave before handing the wait back to MCP.
+const LEAVE_EXIT_MAX_WAIT_SECONDS = 15;
+const LEAVE_EXIT_POLL_SECONDS = 0.1;
+
+// The client answers the leave request before StudioTestService.LeaveTest runs,
+// and the engine keeps the Player of a client that left this way until its
+// connection timeout, about 55 s later. The client's bridge heartbeat stops with
+// its process, so once it does, the server removes the Player itself. A client
+// that keeps sending heartbeats is still running and is left alone: kicking it
+// would leave its window open on a disconnect dialog.
+function completeConfirmedLeave(call: ClientCall, result: unknown): unknown {
+	if (!typeIs(result, "table")) return result;
+	const reply = result as Record<string, unknown>;
+	if (reply.success !== true) return result;
+	const { entry, target } = call;
+	const playerName = entry.player.Name;
+	const confirmedAt = Workspace.GetServerTimeNow();
+	const waitUntil = math.min(call.deadlineAt, os.clock() + LEAVE_EXIT_MAX_WAIT_SECONDS);
+	while (true) {
+		if (entry.player.Parent === undefined) {
+			unregisterProxy(entry.player, entry);
+			return result;
+		}
+		if (call.context.isCancelled() || !RunService.IsRunning() || entry.heartbeat === undefined) return result;
+		const silenceSeconds = Workspace.GetServerTimeNow() - math.max(entry.heartbeat.receivedAt, confirmedAt);
+		if (silenceSeconds > LEAVE_EXIT_SILENCE_SECONDS) break;
+		const remaining = waitUntil - os.clock();
+		if (remaining <= 0) return result;
+		task.wait(math.min(LEAVE_EXIT_POLL_SECONDS, remaining));
+	}
+	const [kicked, kickError] = pcall(() =>
+		entry.player.Kick("The MCP server removed this client after it left the test."),
+	);
+	if (!kicked) {
+		return {
+			...reply,
+			message: `${target} confirmed the leave and its MCP bridge stopped, but removing its Player ${playerName} from the server failed: ${tostring(kickError)}`,
+		};
+	}
+	unregisterProxy(entry.player, entry);
+	return {
+		...reply,
+		removedByServer: true,
+		localPlayer: playerName,
+		message: `${target} left and its Studio process exited. The server removed its Player ${playerName} instead of waiting out the engine's connection timeout.`,
+	};
+}
+
+// A client whose Studio process exited keeps its Player on the server until the
+// engine's connection timeout, a minute or more later, but its bridge heartbeat
+// stops at once. So the leave request stops waiting when the heartbeat goes
+// stale, and the server removes the Player itself: the caller asked for the
+// client to leave, and the client can no longer do it.
+function leaveClient(
+	entry: ProxyEntry,
+	target: string,
+	data: Record<string, unknown> | undefined,
+	context: StudioRequestContext,
+): unknown {
+	const call = beginClientCall(entry, target, LEAVE_CLIENT_ENDPOINT, context);
+	call.abortOnStaleBridge = true;
+	let failure = admitClientCall(call);
+	if (failure === undefined) {
+		const outcome = invokeClient(call, LEAVE_CLIENT_ENDPOINT, data);
+		if (outcome.ok) return completeConfirmedLeave(call, outcome.result);
+		failure = outcome.failure;
+	}
+	const playerName = entry.player.Name;
+	if (entry.player.Parent === undefined) {
+		unregisterProxy(entry.player, entry);
+		return {
+			success: true,
+			alreadyLeft: true,
+			localPlayer: playerName,
+			message: `${target} had already left (its Player is no longer in the server).`,
+		};
+	}
+	if (failure.error !== "client_broker_timeout" && failure.error !== "client_bridge_unresponsive") return failure;
+	const [kicked, kickError] = pcall(() =>
+		entry.player.Kick("The MCP server removed this client: its bridge stopped answering a leave request."),
+	);
+	if (!kicked) {
+		return { ...failure, message: `${failure.message} Removing its Player from the server also failed: ${tostring(kickError)}` };
+	}
+	unregisterProxy(entry.player, entry);
+	const health = failure.bridge as BridgeHealth | undefined;
+	const silence = health?.heartbeatAgeMs !== undefined
+		? `its MCP bridge last sent a heartbeat ${seconds(health.heartbeatAgeMs)} ago`
+		: "no heartbeat has arrived from its MCP bridge";
+	const cause = health?.heartbeatAgeMs === undefined || health.heartbeatAgeMs > BRIDGE_STALE_SECONDS * 1000
+		? "so its Studio process probably exited (window closed or killed) or is frozen"
+		: "so the server-client channel is backlogged";
+	return {
+		success: true,
+		removedByServer: true,
+		localPlayer: playerName,
+		bridge: health,
+		message: `${target} did not answer the leave request and ${silence}, ${cause}. The server removed its Player ${playerName}.`,
+	};
+}
+
 function dispatchClientRequest(
 	peerId: string,
 	target: string,
@@ -1050,6 +1193,9 @@ function dispatchClientRequest(
 	}
 	if (endpoint === "/api/capture-script-profiler") {
 		return invokeClientOnce(entry, target, endpoint, data, context, CLIENT_PROFILER_MAX_WAIT_SECONDS, CLIENT_RESPONSE_RESERVE_SECONDS);
+	}
+	if (endpoint === LEAVE_CLIENT_ENDPOINT) {
+		return leaveClient(entry, target, data, context);
 	}
 	if (endpoint === "/api/capture-studio") {
 		return invokeClientCapture(entry, target, data, context);
@@ -1102,6 +1248,7 @@ function setupHeartbeatChannel(): void {
 	}
 	const event = existing ?? new Instance("RemoteEvent");
 	event.Name = HEARTBEAT_NAME;
+	event.SetAttribute(CHANNEL_ATTRIBUTE, HEARTBEAT_NAME);
 	event.OnServerEvent.Connect((player, payload) => {
 		const entry = proxyByPlayer.get(player);
 		if (entry === undefined) return;
@@ -1143,6 +1290,7 @@ function setupServerBroker() {
 
 	rf.Name = BROKER_NAME;
 	rf.SetAttribute(BROKER_OWNER_ATTRIBUTE, PluginSession.peerId);
+	rf.SetAttribute(CHANNEL_ATTRIBUTE, BROKER_NAME);
 	rf.OnServerInvoke = (player, payload: unknown) => {
 		const identity = parseClientIdentity(payload);
 		if (identity === undefined) {
@@ -1166,12 +1314,29 @@ function setupServerBroker() {
 	});
 }
 
+// Client Peers this server still brokers. MCP drops a client role whose Player
+// left even when the proxy's disconnect notice has not reached it yet.
+function describeClientProxies(): Record<string, unknown>[] {
+	const clients: Record<string, unknown>[] = [];
+	for (const [peerId, entry] of proxyByPeerId) {
+		clients.push({
+			peerId,
+			role: entry.role,
+			player: entry.player.Name,
+			playerPresent: entry.player.Parent !== undefined,
+			heartbeatAgeMs: bridgeHealth(entry).heartbeatAgeMs,
+		});
+	}
+	return clients;
+}
+
 export = {
 	DEFAULT_MCP_URL,
 	setServerUrl,
 	disconnectAllProxies,
 	refreshAllProxyRegistrations,
 	dispatchClientRequest,
+	describeClientProxies,
 	forkRole,
 	setupClientBroker,
 	setupServerBroker,

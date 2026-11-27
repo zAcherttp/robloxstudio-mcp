@@ -34,12 +34,14 @@ const FULL_TESTS = [
   'capture-broker-transfers.mjs',
   'client-profiler-broker-deadline.mjs',
   'client-broker-liveness.mjs',
+  'input-release-cleanup.mjs',
   'large-input-workflow.mjs',
   'studio-tooling-smoke.mjs',
   'eval-bridge-error-preservation.mjs',
   'eval-context-routing.mjs',
   'runtime-bridge-lifecycle.mjs',
   'playtest-control-repro.mjs',
+  'playtest-start-refusal.mjs',
   'play-cycle-event-stream-regression.mjs',
   'micro-profiler-responsiveness.mjs',
   'micro-profiler-units-and-state.mjs',
@@ -53,6 +55,7 @@ const FULL_TESTS = [
   'virtual-input.mjs',
   'multiplayer-add-player-end-regression.mjs',
   'multiplayer-test-lifecycle.mjs',
+  'multiplayer-test-windows.mjs',
   'studio-websocket-transport.mjs',
 ];
 const FEATURE_TESTS = [
@@ -61,9 +64,9 @@ const FEATURE_TESTS = [
   'micro-profiler-responsiveness.mjs',
 ];
 // Long-running/inherently failing investigation scenarios are explicit opt-ins.
-const DIAGNOSTIC_TESTS = ['client-broker-backlog-repro.mjs', 'luau-recipe-stress.mjs', 'luau-http-budget-repro.mjs', 'studio-websocket-quota.mjs', 'play-server-shutdown-disconnect-repro.mjs', 'studio-http-concurrency-repro.mjs', 'micro-profiler-state-verification.mjs', 'micro-profiler-recording-verification.mjs', 'micro-profiler-friction-verification.mjs', 'client-broker-transfer-repro.mjs'];
+const DIAGNOSTIC_TESTS = ['issue-181-client-input-repro.mjs', 'client-broker-backlog-repro.mjs', 'capture-service-video-probe.mjs', 'luau-recipe-stress.mjs', 'luau-http-budget-repro.mjs', 'studio-websocket-quota.mjs', 'play-server-shutdown-disconnect-repro.mjs', 'studio-http-concurrency-repro.mjs', 'micro-profiler-state-verification.mjs', 'micro-profiler-recording-verification.mjs', 'micro-profiler-friction-verification.mjs', 'client-broker-transfer-repro.mjs'];
 // These require explicit environment setup and are not part of the default suite.
-const CONFIGURED_TESTS = ['capture-regressions.mjs'];
+const CONFIGURED_TESTS = ['capture-regressions.mjs', 'capture-video.mjs', 'multiplayer-exited-client.mjs'];
 const featureSmoke = process.argv.includes('--smoke');
 const requestedTestIndex = process.argv.indexOf('--test');
 const requestedTest = requestedTestIndex === -1 ? undefined : process.argv[requestedTestIndex + 1];

@@ -316,14 +316,50 @@ describe('HTTP Server', () => {
     test('multiplayer handler forwards only supported start arguments', async () => {
       const multiplayerPlaytest = jest.fn(async () => ({ content: [] }));
       const fakeTools = { multiplayerPlaytest } as unknown as RobloxStudioTools;
+      const { signal } = new AbortController();
 
       await TOOL_HANDLERS.multiplayer_playtest(fakeTools, {
         action: 'start',
         numPlayers: 2,
         timeout: 5,
+        ready_timeout_s: 30,
         instance_id: 'place:test',
-      });
-      expect(multiplayerPlaytest).toHaveBeenLastCalledWith('start', 2, undefined, undefined, undefined, 5, 'place:test');
+      }, { signal });
+      expect(multiplayerPlaytest).toHaveBeenLastCalledWith('start', 2, undefined, undefined, undefined, 5, 'place:test', 30, signal);
+    });
+
+    test('solo_playtest handler forwards ready_timeout_s and the cancellation signal', async () => {
+      const soloPlaytest = jest.fn(async () => ({ content: [] }));
+      const { signal } = new AbortController();
+      await TOOL_HANDLERS.solo_playtest({ soloPlaytest } as unknown as RobloxStudioTools, { action: 'start', ready_timeout_s: 45 }, { signal });
+      expect(soloPlaytest).toHaveBeenLastCalledWith('start', undefined, undefined, undefined, 45, signal);
+    });
+
+    test('runtime eval handlers forward the wait options and cancellation signal', async () => {
+      const evalServerRuntime = jest.fn(async () => ({ content: [] }));
+      const evalClientRuntime = jest.fn(async () => ({ content: [] }));
+      const fakeTools = { evalServerRuntime, evalClientRuntime } as unknown as RobloxStudioTools;
+      const wait = { wait_until: 'workspace:GetAttribute("Ready")', timeout_s: 12, poll_ms: 100 };
+
+      const { signal } = new AbortController();
+
+      await TOOL_HANDLERS.eval_server_runtime(fakeTools, { instance_id: 'place:test', operation_id: 'op-1', ...wait }, { signal });
+      await TOOL_HANDLERS.eval_client_runtime(fakeTools, { code: 'return 1', target: 'client-2', ...wait }, { signal });
+
+      const forwarded = expect.objectContaining(wait);
+      expect(evalServerRuntime).toHaveBeenLastCalledWith(undefined, 'place:test', 'op-1', forwarded, signal);
+      expect(evalClientRuntime).toHaveBeenLastCalledWith('return 1', 'client-2', undefined, undefined, forwarded, signal);
+    });
+
+    test('capture_screenshot handler forwards the sequence options', async () => {
+      const captureScreenshot = jest.fn(async () => ({ content: [] }));
+      const fakeTools = { captureScreenshot } as unknown as RobloxStudioTools;
+
+      await TOOL_HANDLERS.capture_screenshot(fakeTools, { frames: 4, interval_ms: 250, grid: true });
+
+      expect(captureScreenshot).toHaveBeenLastCalledWith(undefined, undefined, undefined, expect.objectContaining({
+        frames: 4, interval_ms: 250, grid: true,
+      }));
     });
 
     test('selection handler forwards the lifecycle action and options together', async () => {
@@ -563,6 +599,35 @@ describe('HTTP Server', () => {
       });
       expect(bridge.getInstances()).toEqual([]);
 
+      // Retries refresh one entry instead of growing the list.
+      await request(versionedApp).post('/ready').send({ ...READY_BODY, pluginVersion: '1.9.0' }).expect(426);
+      const rejectedHealth = await request(versionedApp).get('/health').expect(200);
+      expect(rejectedHealth.body.pluginConnected).toBe(false);
+      expect(rejectedHealth.body.versionRejections).toEqual([
+        expect.objectContaining({
+          instanceId: READY_BODY.instanceId,
+          role: READY_BODY.role,
+          placeName: READY_BODY.placeName,
+          pluginVersion: '1.9.0',
+          pluginVariant: READY_BODY.pluginVariant,
+          serverVersion: '2.0.0',
+          rejectedAt: expect.any(Number),
+          hint: expect.stringMatching(/^Studio plugin v1\.9\.0 ≠ server v2\.0\.0; restart the MCP server that owns port \d+/),
+        }),
+      ]);
+      expect(rejectedHealth.body.versionRejections[0]).not.toHaveProperty('peerId');
+      const topology = await request(versionedApp).get('/topology').expect(200);
+      expect(topology.body.versionRejections).toHaveLength(1);
+      const connected = JSON.parse((await tools.getConnectedInstances()).content[0].text);
+      expect(connected.rejectedInstances).toEqual([
+        expect.objectContaining({
+          instanceId: READY_BODY.instanceId,
+          pluginVersion: '1.9.0',
+          serverVersion: '2.0.0',
+          hint: expect.stringContaining('restart the MCP server that owns port'),
+        }),
+      ]);
+
       await request(versionedApp).post('/ready').send({
         ...READY_BODY,
         pluginVersion: '2.0.0',
@@ -577,7 +642,8 @@ describe('HTTP Server', () => {
         pluginVariant: 'main',
         serverVersion: '2.0.0',
       });
-      expect(health.body).not.toHaveProperty('versionMismatch');
+      expect(health.body.versionRejections).toEqual([]);
+      expect(JSON.parse((await tools.getConnectedInstances()).content[0].text)).not.toHaveProperty('rejectedInstances');
     });
 
     test('rejects /ready when the server has no version contract', async () => {

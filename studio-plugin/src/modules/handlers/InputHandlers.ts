@@ -24,9 +24,12 @@
 // -20 px with the cursor locked turned an aim by exactly what 200 real pixels do.
 //
 // Verified live on a play client: move and scroll reach game scripts with
-// the device simulator stopped. Under touch device emulation the client has
-// no mouse: clicks arrive as Touch, scroll still works, but moves never reach
-// the game, so we reject move there instead of returning a false success.
+// the device simulator stopped. Under touch device emulation clicks arrive as
+// Touch and scroll still works, but moves never reach the game, so we reject
+// move there instead of returning a false success. Emulation does not always
+// clear MouseEnabled (it stays true when the simulator was on before the
+// playtest), so a simulated device with TouchEnabled counts too. TouchEnabled
+// alone does not: real touchscreen laptops have a working mouse.
 //
 // Upstream deliberately does not expose SendMouseDelta: it only works while the
 // cursor is locked (MouseBehavior.LockCenter), and on desktop Studio holds that
@@ -39,6 +42,7 @@
 // have more pixels than the viewport (Retina, or a downscale), so the server maps x/y read off
 // the last capture_screenshot to viewport pixels before they reach this handler.
 
+import * as DeviceScreen from "../DeviceScreen";
 import * as RenderMonitor from "../RenderMonitor";
 
 const UserInputService = game.GetService("UserInputService");
@@ -124,18 +128,60 @@ function mouseAction(vi: VirtualInput, requestData: Record<string, unknown>) {
 
 const NO_MOUSE_ERROR =
 	"This client has no mouse (touch device emulation is active), so cursor movement never reaches the game. " +
-	"Stop it with set_device_simulator stopSimulation=true, then retry.";
+	'Use action="click" (delivered as Touch), or stop emulation with set_device_simulator stopSimulation=true and retry.';
+
+const RELEASE_RETRY_NOTE = " The release will be re-sent when the window renders again.";
+
+// Releases that may not have reached the engine (sent while the window wasn't
+// rendering, or the up event threw). Re-sent on the next stale→fresh frame.
+// Mouse entries keep the position the release should be sent at.
+const pendingKeyReleases = new Set<Enum.KeyCode>();
+const pendingButtonReleases = new Map<Enum.UserInputType, Vector2>();
+
+function flushPendingReleases(): void {
+	const vi = cachedVI;
+	if (vi) {
+		for (const keyCode of pendingKeyReleases) {
+			pcall(() => vi.SendKey(false, keyCode));
+		}
+		for (const [inputType, pos] of pendingButtonReleases) {
+			pcall(() => vi.SendMouseButton(pos, inputType, false));
+		}
+	}
+	pendingKeyReleases.clear();
+	pendingButtonReleases.clear();
+}
+
+RenderMonitor.onRenderResumed(flushPendingReleases);
+
+const MOUSE_ACTIONS = new Set(["click", "mouseDown", "mouseUp", "move", "delta", "scroll", "pan", "pinch"]);
+const KEY_ACTIONS = new Set(["press", "release", "tap"]);
 
 function simulateMouseInput(requestData: Record<string, unknown>) {
 	const action = requestData.action as string;
 	if (!action) return { error: "action is required" };
+	const x = num(requestData.x);
+	const y = num(requestData.y);
+	const button = (requestData.button as string) ?? "Left";
+	if (!MOUSE_ACTIONS.has(action)) {
+		return { error: `Unsupported action "${action}". Use click, mouseDown, mouseUp, move, delta, scroll, pan, or pinch.` };
+	}
+	if (POSITIONED.has(action) && (x === undefined || y === undefined)) {
+		return { error: `x and y are required for ${action}` };
+	}
 
 	// Input is silently dropped by the engine when the window isn't rendering
 	// (e.g. minimized). Surface that instead of returning a false success.
+	// mouseUp is exempt: a held button must always be releasable.
 	const notRendering = RenderMonitor.notRenderingReason();
-	if (notRendering !== undefined) return { error: notRendering };
+	if (notRendering !== undefined && action !== "mouseUp") return { error: notRendering };
 
-	if (action === "move" && !UserInputService.MouseEnabled) {
+	if (
+		action === "move" &&
+		(!UserInputService.MouseEnabled ||
+			(UserInputService.TouchEnabled &&
+				(DeviceScreen.isDeviceSimulating() || DeviceScreen.isScaled(DeviceScreen.measureScreenScale()))))
+	) {
 		return { error: NO_MOUSE_ERROR };
 	}
 
@@ -144,16 +190,90 @@ function simulateMouseInput(requestData: Record<string, unknown>) {
 		return { error: "UserInputService:CreateVirtualInput() is not available in this context" };
 	}
 
-	const [success, err] = pcall(() => mouseAction(vi, requestData));
-	if (success) {
-		return { success: true, action, x: requestData.x, y: requestData.y, button: requestData.button ?? "Left" };
+	const inputType = MOUSE_TYPE_MAP[button] ?? Enum.UserInputType.MouseButton1;
+	const pos = new Vector2(x ?? 0, y ?? 0);
+	const result: Record<string, unknown> = { success: true, action, x, y };
+	if (action !== "move" && action !== "delta" && action !== "scroll" && action !== "pan" && action !== "pinch") {
+		result.button = button;
 	}
+
+	if (action === "mouseUp") {
+		const [ok, err] = pcall(() => vi.SendMouseButton(pos, inputType, false));
+		if (notRendering !== undefined) {
+			// The engine may drop this while not rendering; never report it as delivered.
+			pendingButtonReleases.set(inputType, pos);
+			result.deliveryConfirmed = false;
+			result.warning = ok
+				? notRendering + RELEASE_RETRY_NOTE
+				: `${notRendering} Sending the release failed: ${err}.${RELEASE_RETRY_NOTE}`;
+			return result;
+		}
+		if (!ok) {
+			pendingButtonReleases.set(inputType, pos);
+			return { error: `Failed to simulate mouse input: ${err}. The ${button} button may still be held.` };
+		}
+		pendingButtonReleases.delete(inputType);
+		return result;
+	}
+
+	if (action === "click" || action === "mouseDown") {
+		const [downOk, downErr] = pcall(() => vi.SendMouseButton(pos, inputType, true));
+		if (!downOk) return { error: `Failed to simulate mouse input: ${downErr}` };
+		pendingButtonReleases.delete(inputType);
+		if (action === "mouseDown") return result;
+
+		// Down landed, so the up must run even if something fails in between.
+		task.wait(0.05);
+		const [upOk, upErr] = pcall(() => vi.SendMouseButton(pos, inputType, false));
+		if (!upOk) {
+			pendingButtonReleases.set(inputType, pos);
+			return {
+				error:
+					`Click pressed ${button} but releasing it failed: ${upErr}. ` +
+					`The ${button} button may still be held; call simulate_mouse_input with action="mouseUp" to release it.`,
+			};
+		}
+		const staleAfter = RenderMonitor.notRenderingReason();
+		if (staleAfter !== undefined) {
+			// The window stopped rendering during the hold; the up may have been dropped.
+			pendingButtonReleases.set(inputType, pos);
+			result.deliveryConfirmed = false;
+			result.warning = staleAfter + RELEASE_RETRY_NOTE;
+		}
+		return result;
+	}
+
+	const [success, err] = pcall(() => mouseAction(vi, requestData));
+	if (success) return result;
 	return { error: `Failed to simulate mouse input: ${err}` };
 }
 
 function simulateKeyboardInput(requestData: Record<string, unknown>) {
+	const text = requestData.text as string | undefined;
+	const keyCodeName = requestData.keyCode as string;
+	const action = (requestData.action as string) ?? "tap";
+	const duration = (requestData.duration as number) ?? 0.1;
+
+	// Validate before the render gate so bad arguments report themselves.
+	let keyCode: Enum.KeyCode | undefined;
+	if (text === undefined) {
+		if (!keyCodeName) return { error: "keyCode (or text) is required" };
+		const [enumOk, found] = pcall(() => {
+			return (Enum.KeyCode as unknown as Record<string, Enum.KeyCode>)[keyCodeName];
+		});
+		if (!enumOk || !found) {
+			return {
+				error: `Unknown keyCode: ${keyCodeName}. Use Enum.KeyCode names like "W", "Space", "E", "LeftShift", etc.`,
+			};
+		}
+		keyCode = found;
+		if (!KEY_ACTIONS.has(action)) return { error: `Unknown action: ${action}. Use press, release, or tap.` };
+	}
+
+	// release is exempt: a held key must always be releasable.
 	const notRendering = RenderMonitor.notRenderingReason();
-	if (notRendering !== undefined) return { error: notRendering };
+	const isRelease = text === undefined && action === "release";
+	if (notRendering !== undefined && !isRelease) return { error: notRendering };
 
 	const vi = getVI();
 	if (!vi) {
@@ -161,46 +281,58 @@ function simulateKeyboardInput(requestData: Record<string, unknown>) {
 	}
 
 	// Text mode: type a string into the focused TextBox.
-	const text = requestData.text as string | undefined;
 	if (text !== undefined) {
 		const [ok, err] = pcall(() => vi.SendTextInput(text));
 		if (ok) return { success: true, text };
 		return { error: `Failed to send text input: ${err}` };
 	}
 
-	const keyCodeName = requestData.keyCode as string;
-	if (!keyCodeName) return { error: "keyCode (or text) is required" };
+	const key = keyCode as Enum.KeyCode;
+	const result: Record<string, unknown> = { success: true, keyCode: keyCodeName, action };
 
-	const action = (requestData.action as string) ?? "tap";
-	const duration = (requestData.duration as number) ?? 0.1;
+	if (action === "release") {
+		const [ok, err] = pcall(() => vi.SendKey(false, key));
+		if (notRendering !== undefined) {
+			// The engine may drop this while not rendering; never report it as delivered.
+			pendingKeyReleases.add(key);
+			result.deliveryConfirmed = false;
+			result.warning = ok
+				? notRendering + RELEASE_RETRY_NOTE
+				: `${notRendering} Sending the release failed: ${err}.${RELEASE_RETRY_NOTE}`;
+			return result;
+		}
+		if (!ok) {
+			pendingKeyReleases.add(key);
+			return { error: `Failed to simulate keyboard input: ${err}. Key ${keyCodeName} may still be held.` };
+		}
+		pendingKeyReleases.delete(key);
+		return result;
+	}
 
-	const [enumOk, keyCode] = pcall(() => {
-		return (Enum.KeyCode as unknown as Record<string, Enum.KeyCode>)[keyCodeName];
-	});
-	if (!enumOk || !keyCode) {
+	const [downOk, downErr] = pcall(() => vi.SendKey(true, key));
+	if (!downOk) return { error: `Failed to simulate keyboard input: ${downErr}` };
+	pendingKeyReleases.delete(key);
+	if (action === "press") return result;
+
+	// tap: the down landed, so the up must run even if something fails in between.
+	task.wait(duration);
+	const [upOk, upErr] = pcall(() => vi.SendKey(false, key));
+	if (!upOk) {
+		pendingKeyReleases.add(key);
 		return {
-			error: `Unknown keyCode: ${keyCodeName}. Use Enum.KeyCode names like "W", "Space", "E", "LeftShift", etc.`,
+			error:
+				`Tap pressed ${keyCodeName} but releasing it failed: ${upErr}. ` +
+				`Key ${keyCodeName} may still be held; call simulate_keyboard_input with action="release" to release it.`,
 		};
 	}
-
-	const [success, err] = pcall(() => {
-		if (action === "press") {
-			vi.SendKey(true, keyCode);
-		} else if (action === "release") {
-			vi.SendKey(false, keyCode);
-		} else if (action === "tap") {
-			vi.SendKey(true, keyCode);
-			task.wait(duration);
-			vi.SendKey(false, keyCode);
-		} else {
-			error(`Unknown action: ${action}`);
-		}
-	});
-
-	if (success) {
-		return { success: true, keyCode: keyCodeName, action };
+	const staleAfter = RenderMonitor.notRenderingReason();
+	if (staleAfter !== undefined) {
+		// The window stopped rendering during the hold; the up may have been dropped.
+		pendingKeyReleases.add(key);
+		result.deliveryConfirmed = false;
+		result.warning = staleAfter + RELEASE_RETRY_NOTE;
 	}
-	return { error: `Failed to simulate keyboard input: ${err}` };
+	return result;
 }
 
 // The longest a sequence may wait in all, seconds, so one call cannot hold the client for long.

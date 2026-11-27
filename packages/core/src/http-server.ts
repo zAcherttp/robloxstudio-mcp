@@ -8,7 +8,7 @@ import { toNodeHandler } from '@modelcontextprotocol/node';
 import { MAX_SCRIPT_EDITS, RobloxStudioTools } from './tools/index.js';
 import type { ScriptEdit } from './tools/index.js';
 import { BridgeService, isValidOperationId, MAX_OPERATION_WAIT_MS, MultiplayerGroupInUseError, PRIMARY_PROXY_FEATURES, RequestFailure, RoutingFailure } from './bridge-service.js';
-import type { PublicStudioInstance, PublicStudioPeer, RegisterPeerResult } from './bridge-service.js';
+import type { PluginVersionRejection, PublicStudioInstance, PublicStudioPeer, RegisterPeerResult } from './bridge-service.js';
 import type { ToolDefinition } from './tools/definitions.js';
 import { createToolHttpHandler, normalizeToolResult, publicToolErrorBody } from './mcp-runtime.js';
 import type { ToolInvocationContext } from './mcp-runtime.js';
@@ -83,6 +83,7 @@ const TOOL_PROXY_ENDPOINTS: Record<string, readonly string[]> = {
   generate_model: ['/api/generate-model'],
   preview_asset: ['/api/preview-asset'],
   capture_screenshot: ['/api/capture-studio', '/api/capture-screenshot', '/api/capture-begin', '/api/capture-read', '/api/capture-markers'],
+  capture_video: ['/api/capture-markers'],
   simulate_mouse_input: ['/api/simulate-mouse-input'],
   simulate_keyboard_input: ['/api/simulate-keyboard-input'],
   simulate_input_sequence: ['/api/simulate-input-sequence'],
@@ -285,8 +286,18 @@ export const TOOL_HANDLERS: Record<string, ToolHandler> = {
   get_attributes: (tools, body) => tools.getAttributes(body.instancePath, body.instance_id),
   selection: (tools, body) => tools.selection(body.action, body, body.instance_id),
   execute_luau: (tools, body) => tools.executeLuau(body.code, body.target, body.instance_id, body.operation_id, { file: body.file }),
-  eval_server_runtime: (tools, body) => tools.evalServerRuntime(body.code, body.instance_id, body.operation_id, evalJobOptions(body)),
-  eval_client_runtime: (tools, body) => tools.evalClientRuntime(body.code, body.target, body.instance_id, body.operation_id, evalJobOptions(body)),
+  eval_server_runtime: (tools, body, context) => tools.evalServerRuntime(body.code, body.instance_id, body.operation_id, {
+    ...evalJobOptions(body),
+    wait_until: body.wait_until,
+    timeout_s: body.timeout_s,
+    poll_ms: body.poll_ms,
+  }, context?.signal),
+  eval_client_runtime: (tools, body, context) => tools.evalClientRuntime(body.code, body.target, body.instance_id, body.operation_id, {
+    ...evalJobOptions(body),
+    wait_until: body.wait_until,
+    timeout_s: body.timeout_s,
+    poll_ms: body.poll_ms,
+  }, context?.signal),
   set_network_profile: (tools, body) => tools.setNetworkProfile(body.profile, body.target, body.overrides, body.instance_id, { ms: body.ms, verbose: body.verbose === true }),
   get_simulation_state: (tools, body) => tools.getSimulationState(body.include, body.target, body.instance_id),
   reset_simulation_state: (tools, body) => tools.resetSimulationState(body.target, body.network, body.deviceSimulator, body.instance_id),
@@ -296,8 +307,13 @@ export const TOOL_HANDLERS: Record<string, ToolHandler> = {
   manage_instance: (tools, body) => tools.manageInstance({ ...body, verbose: body.verbose === true }),
   manage_monetization: (tools, body) => tools.manageMonetization(body, body.instance_id),
   manage_experience: (tools, body) => tools.manageExperience(body, body.instance_id),
-  solo_playtest: (tools, body) => tools.soloPlaytest(body.action, body.mode, body.timeout, body.instance_id),
-  multiplayer_playtest: (tools, body) => tools.multiplayerPlaytest(body.action, body.numPlayers, body.target, body.testArgs, body.value, body.timeout, body.instance_id),
+  solo_playtest: (tools, body, context) => tools.soloPlaytest(
+    body.action, body.mode, body.timeout, body.instance_id, body.ready_timeout_s, context?.signal,
+  ),
+  multiplayer_playtest: (tools, body, context) => tools.multiplayerPlaytest(
+    body.action, body.numPlayers, body.target, body.testArgs, body.value, body.timeout, body.instance_id, body.ready_timeout_s,
+    context?.signal,
+  ),
   get_runtime_logs: (tools, body, context) => tools.getRuntimeLogs(body.instance_id, body.multiplayer_group_id, body.cursor, body.cursor_by_instance, body.tail, body.filter, context?.signal, {
     verbose: body.verbose === true,
     exact: body.exact === true,
@@ -364,7 +380,23 @@ export const TOOL_HANDLERS: Record<string, ToolHandler> = {
     body.maxAudioPreviews,
   ),
   upload_asset: (tools, body) => tools.uploadAsset(body.filePath, body.assetType, body.displayName, body.description, body.userId, body.groupId),
-  capture_screenshot: (tools, body) => tools.captureScreenshot(body.instance_id, body.format, body.quality, { full_size: body.full_size === true, verbose: body.verbose === true }),
+  capture_screenshot: (tools, body) => tools.captureScreenshot(body.instance_id, body.format, body.quality, {
+    full_size: body.full_size === true,
+    verbose: body.verbose === true,
+    frames: body.frames,
+    interval_ms: body.interval_ms,
+    grid: body.grid,
+  }),
+  capture_video: (tools, body) => tools.captureVideo({
+    action: body.action,
+    duration_ms: body.duration_ms,
+    fps: body.fps,
+    output_path: body.output_path,
+    frames: body.frames,
+    input_path: body.input_path,
+    start_ms: body.start_ms,
+    end_ms: body.end_ms,
+  }, body.instance_id),
   simulate_mouse_input: (tools, body) => tools.simulateMouseInput(body.action, body.x, body.y, body.button, body.wheel, body.target, body.instance_id, { dx: body.dx, dy: body.dy, amount: body.amount }),
   simulate_input_sequence: (tools, body) => tools.simulateInputSequence(body.steps, body.target, body.instance_id),
   simulate_keyboard_input: (tools, body) => tools.simulateKeyboardInput(body.keyCode, body.action, body.duration, body.text, body.target, body.instance_id),
@@ -412,7 +444,6 @@ export function createHttpServer(tools: RobloxStudioTools, bridge: BridgeService
   let lastMCPActivity = 0;
   let mcpServerStartTime = 0;
   const proxyInstances = new Set<string>();
-  const rejectedVersionPeers = new Set<string>();
   const studioTransport = new WebSocketStudioTransport(bridge);
   const transportTokens = new Map<string, string>();
   const boundServers = new Set<http.Server>();
@@ -658,6 +689,12 @@ export function createHttpServer(tools: RobloxStudioTools, bridge: BridgeService
       activeWebSockets: studioTransport.activeSocketCount,
       studioSocketCapacity: MAX_ACTIVE_STUDIO_SOCKETS,
       streamableHttp: !!serverConfig,
+      // Passive callers never see peer IDs; only the instance needs naming.
+      versionRejections: bridge.getVersionRejections().map((rejection) => {
+        const passive: Partial<PluginVersionRejection> = { ...rejection };
+        delete passive.peerId;
+        return passive;
+      }),
     });
   });
 
@@ -738,9 +775,21 @@ export function createHttpServer(tools: RobloxStudioTools, bridge: BridgeService
       return;
     }
     if (pluginVersion !== serverVersion) {
-      if (!rejectedVersionPeers.has(peerId)) {
-        if (rejectedVersionPeers.size >= 256) rejectedVersionPeers.clear();
-        rejectedVersionPeers.add(peerId);
+      const alreadyRejected = bridge.getVersionRejections()
+        .some((rejection) => rejection.peerId === peerId && rejection.instanceId === instanceId);
+      bridge.recordVersionRejection({
+        peerId,
+        instanceId,
+        role,
+        placeId,
+        placeName,
+        dataModelName,
+        pluginVersion,
+        pluginVariant,
+        serverVersion,
+        port: req.socket.localPort,
+      });
+      if (!alreadyRejected) {
         console.error(
           `[plugin-version-rejected] Studio plugin v${pluginVersion} (${pluginVariant}) ` +
           `does not match MCP server v${serverVersion} for ${instanceId}/${role}`,
@@ -937,6 +986,7 @@ export function createHttpServer(tools: RobloxStudioTools, bridge: BridgeService
       ...bridge.getTopologySnapshot(),
       serverVersion: serverConfig?.version,
       proxyFeatures: PRIMARY_PROXY_FEATURES,
+      versionRejections: bridge.getVersionRejections(),
     });
   });
 
@@ -1138,13 +1188,15 @@ export async function listenWithRetry(
         'code' in error &&
         error.code === 'EADDRINUSE'
       ) {
-        console.error(`Port ${port} in use, trying next...`);
+        if (i + 1 < maxAttempts) console.error(`Port ${port} in use, trying next...`);
         continue;
       }
       throw error;
     }
   }
-  throw new Error(`All ports ${startPort}-${startPort + maxAttempts - 1} are in use. Stop some MCP server instances and retry.`);
+  throw new Error(maxAttempts === 1
+    ? `Port ${startPort} is in use.`
+    : `All ports ${startPort}-${startPort + maxAttempts - 1} are in use. Stop some MCP server instances and retry.`);
 }
 
 function bindPort(app: express.Express, host: string, port: number): Promise<http.Server> {

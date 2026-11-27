@@ -32,6 +32,12 @@ Tool descriptions explain selection. Input schemas explain arguments. This guide
 - Use action=view with a BasePart or Model path to frame it, or omit path to frame exactly one selected BasePart or Model. Empty, multiple, or unsupported selections require an explicit target or a changed selection. The original camera type is restored after framing, including on failure. The current viewing direction is preserved unless from or angleY overrides it. padding below 1 crops closer and above 1 pulls back.
 - For visual proof, change the instance, frame it with selection, then call capture_screenshot.
 
+## Video recording
+
+- Use capture_video instead of repeated capture_screenshot calls to review motion such as a cutscene, camera path, tween, or animation. action=record records for duration_ms (up to 30 s) and blocks. To record a moment you trigger with other tools, call action=start, trigger it (execute_luau, eval_client_runtime, or simulated input), then action=stop; a started recording stops itself after 5 minutes.
+- The result saves an MP4 at video.path and returns one storyboard image of evenly spaced frames, with each frame's time in storyboard.times_ms; frames sets how many (0 omits the image). Re-sample part of a saved video with action=storyboard, input_path, start_ms, and end_ms instead of recording again.
+- During a playtest the recording follows the client viewport, like capture_screenshot. It reads the Studio window on the MCP host through FFmpeg: 8 or newer on Windows or WSL, which keeps recording behind other windows but not while Studio is minimized; 5.1 or newer with x11grab on Linux, which records the screen area, so Studio must stay uncovered and on-screen. Studio draws about 15 fps in the background, so bring Studio to the front for smooth playback.
+
 ## Script changes
 
 - Read the relevant source with get_script_source before changing it.
@@ -44,6 +50,10 @@ Tool descriptions explain selection. Input schemas explain arguments. This guide
 
 Start solo_playtest or multiplayer_playtest before targeting a live server or client. Stop the playtest when the scenario is complete.
 
+To wait for game state, pass wait_until to eval_server_runtime or eval_client_runtime instead of sleeping or repeating calls. wait_until is a Luau expression such as workspace:GetAttribute("Round") == 2, or a block that returns a value (used when the text compiles only as a block). It must not yield: WaitForChild, task.wait, or a remote call ends the wait with an error, so use FindFirstChild. It is polled every poll_ms (default 250; at most 120 polls per wait, so long waits poll less often) until truthy or until timeout_s (default 20, max 300) passes. Runtime errors count as not yet true, so a condition may index objects that do not exist yet; on timeout the result carries the last value and lastError. A compile error, a yield, a stopped playtest, or a vanished peer ends the wait at once. code, when given, runs once before polling. The result is {satisfied, value, elapsed_ms, polls}, plus error when satisfied is false; value is the condition's result as text.
+
+solo_playtest start defaults to mode=play (server and client-1); mode=run starts a server only. A start (solo or multiplayer) succeeds only after every runtime peer answers a trivial eval, so the next eval, log, or capture call can run at once. Its targets list has one {role, instance_id, target} per peer: pass that instance_id, plus target on tools that take one, to address the peer. Raise ready_timeout_s (default 90) for slow places. A failed start lists notReady peers with their last error and leaves the playtest running; stop it before starting again.
+
 execute_luau runs through the Studio plugin. eval_server_runtime and eval_client_runtime run inside a live game VM and share that VM's require cache with game scripts. Use the eval tools when module state or the runtime Script or LocalScript environment matters. A project's .robloxstudio/eval-prelude.server.luau and .client.luau run once per playtest peer before its first eval (again if they change), for shared helpers in _G.
 
 Requests to a client Peer go through the server Peer's broker. client_broker_timeout and client_bridge_unresponsive describe that channel, not the game: the client can keep running while its bridge is stalled. Their message says whether the request reached the client, is still running there, or is held up between server and client. Do not treat them as a client hang. Check the game through eval_server_runtime, and restart the playtest if the bridge does not recover.
@@ -53,6 +63,18 @@ Read output with get_runtime_logs. Reuse nextCursor as cursor for one Instance, 
 - Each Peer VM retains approximately 64 KiB of message text, rather than a fixed message count. Reads do not consume or clear the buffer; incoming messages evict old entries.
 - totalDropped sums lifetime eviction counts from successfully read Peers. It counts messages evicted, not messages missed by this caller, and may decrease when Peers fail, disconnect, or reload.
 - For successfully read Peers, nextCursor advances past all captured entries, including those omitted by filter or tail. It is a continuation watermark, not pagination through omitted results; continuing from it will not return those entries.
+
+## Long calls and pending results
+
+MCP clients abandon a call after their own timeout, and the caller then cannot tell what happened. solo_playtest start and stop, multiplayer_playtest start, add_players, leave_client and end, and wait_until therefore answer within a 25 second response budget (ROBLOX_STUDIO_MCP_RESPONSE_BUDGET_MS). Work still running then returns state "pending" with a requestId and keeps running. Call get_request_status with that request_id and wait_ms up to 25000 until state is "settled"; its result field holds the original result, or outcome is "error" when the call failed. Do not repeat the call: an identical call while it runs joins the same job instead of starting the playtest twice. Finished results stay available for five minutes in the same server process.
+
+## Screenshots
+
+capture_screenshot returns the 3D viewport for the edit view or, during a playtest, the client view.
+
+- frames=N with interval_ms (default 500) captures a timed sequence: at most 16 frames within 20 seconds. grid=true returns them as one numbered contact sheet; without grid each frame is a separate image. The text item lists each frame's atMs offset.
+- To review motion, use capture_video where it can record (FFmpeg on the MCP host); it captures real motion. A contact sheet is a cheap short sample that works everywhere.
+- Take simulate_mouse_input coordinates from a single-frame capture, never from a contact sheet.
 
 ## Simulation and input
 
@@ -90,7 +112,7 @@ Studio must allow third-party asset loading for public third-party previews and 
 
 generate_model stages generated content under ServerStorage for review. upload_asset sends an explicit local file to the chosen Roblox user or group.
 
-generate_model with async=true returns a job status with its requestId before generation finishes. Check it, wait for it, or read its result with get_request_status (wait_ms waits for completion). The job stays on the Studio instance that started it. A disconnected caller or an ended wait never cancels it, and no tool can cancel a running generation. Pass operation_id so a retry with identical arguments joins the same job instead of generating a second model. With image_path or image_base64, the status adds phase (uploading, generating, completed, failed, or unknown when a wait ended without a result) and preparation; a retry reuses the uploaded image, and an upload whose outcome is unknown is never repeated. Results stay available for five minutes after the job finishes (or after timeout_ms passes without a result), within the current server session; large results can be evicted sooner.
+generate_model with async=true returns a job status with its requestId before generation finishes. Check it, wait for it, or read its result with get_request_status (wait_ms waits for completion, up to the response budget per check). The job stays on the Studio instance that started it. A disconnected caller or an ended wait never cancels it, and no tool can cancel a running generation. Pass operation_id so a retry with identical arguments joins the same job instead of generating a second model. With image_path or image_base64, the status adds phase (uploading, generating, completed, failed, or unknown when a wait ended without a result) and preparation; a retry reuses the uploaded image, and an upload whose outcome is unknown is never repeated. Results stay available for five minutes after the job finishes (or after timeout_ms passes without a result), within the current server session; large results can be evicted sooner.
 
 ## Monetization
 
@@ -98,8 +120,8 @@ manage_monetization lists, reads, creates, and updates developer products and ga
 
 - Roblox cannot delete developer products or game passes. To retire one, update it with for_sale=false.
 - create keeps new items off sale unless for_sale=true, which also needs a price.
-- create refuses a name that already exists in the universe and returns the existing item. If a create times out, list the universe before retrying.
-- update changes only the arguments supplied, then reads the item back.
+- create refuses a name that already exists in the universe and returns the existing item. If a create returns create_outcome_unknown, list the universe first; if the item never appears, retry after retry_after.
+- update changes only the arguments supplied, then reads the item back. It refuses to rename an item to a name another item already uses.
 - image_path uploads a local PNG, JPEG, or BMP icon. Roblox shows icons at 512x512 inside a circle, so keep details away from the corners.
 
 ## Experience settings

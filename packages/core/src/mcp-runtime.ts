@@ -12,6 +12,7 @@ import { registerResourceHandlers } from './mcp-compat.js';
 import { OpenCloudOperationError } from './opencloud-client.js';
 import { StudioLaunchPreDispatchError } from './studio-instance-manager.js';
 import type { RobloxStudioTools } from './tools/index.js';
+import { ReferenceUploadError } from './tools/reference-uploads.js';
 import { DEFERRED_TOOLS, type ToolDefinition } from './tools/definitions.js';
 
 export type ProtocolEra = McpRequestContext['era'];
@@ -70,6 +71,7 @@ const TEXT_RESULT_TOOLS = new Set(['get_roblox_docs']);
 const SIDE_EFFECTING_READ_TOOLS = new Set([
   'capture_micro_profiler',
   'capture_script_profiler',
+  'capture_video',
   'export_rbxm',
   'selection',
 ]);
@@ -149,8 +151,9 @@ function parseJsonObject(text: string): Record<string, unknown> | undefined {
 
 /**
  * Converts the historic JSON-in-text result shape into the lean 2026 MCP shape.
- * Modern clients receive JSON once in structuredContent; legacy clients keep the
- * text projection required by older SDKs. Human-readable text and media survive.
+ * Modern clients receive JSON once in structuredContent (the MCP handler adds it
+ * back as text on failures; see withErrorText); legacy clients keep the text
+ * projection required by older SDKs. Human-readable text and media survive.
  */
 export function normalizeToolResult(raw: unknown, era: ProtocolEra): CallToolResult {
   const result = (raw && typeof raw === 'object' ? raw : {}) as ToolResultLike;
@@ -195,6 +198,19 @@ export function normalizeToolResult(raw: unknown, era: ProtocolEra): CallToolRes
   };
 }
 
+// Clients such as Claude Code show a failed call's text content and ignore its
+// structuredContent, so an error with no text block reaches the user as
+// "Unknown error". Keep the error JSON as text on MCP failures.
+function withErrorText(result: CallToolResult): CallToolResult {
+  if (!result.isError || !result.structuredContent || result.content.some((block) => block.type === 'text')) {
+    return result;
+  }
+  return {
+    ...result,
+    content: [{ type: 'text', text: JSON.stringify(result.structuredContent) }, ...result.content],
+  };
+}
+
 function publicRoutingError(error: RoutingFailure): Record<string, unknown> {
   return {
     error: error.routingError.code,
@@ -236,6 +252,9 @@ export function publicToolErrorBody(name: string, error: unknown): Record<string
       ...(error.providerCode !== undefined ? { provider_code: error.providerCode } : {}),
       operation_path: error.operationPath,
     };
+  }
+  if (error instanceof ReferenceUploadError) {
+    return { error: error.code, message: error.message.slice(0, 500) };
   }
 
   console.error(`[tool:${name}]`, error);
@@ -306,7 +325,7 @@ export function serverInstructions(definitions: readonly ToolDefinition[]): stri
   }
   if (has('get_request_status', 'execute_luau', 'set_properties')) {
     instructions.push(
-      'Supply a unique operation_id to any Studio write tool that accepts one when retry safety matters. After a timeout, query get_request_status with that ID before retrying; pass wait_ms to wait for a late result. Ending that wait never cancels the operation. Identical arguments reuse a retained outcome; changed arguments are rejected. Recovery and deduplication are bounded to the current server session and five-minute retention window; result payloads may be evicted earlier. Unknown status does not mean unexecuted, and cancellation cannot roll back mutations. For script writes, expected_revision from the last read also refuses a repeated or stale write after that window.',
+      'Supply a unique operation_id to any Studio write tool that accepts one when retry safety matters. After a timeout, query get_request_status with that ID before retrying; pass wait_ms to wait for a late result, up to the response budget per check. Ending that wait never cancels the operation. Identical arguments reuse a retained outcome; changed arguments are rejected. Recovery and deduplication are bounded to the current server session and five-minute retention window; result payloads may be evicted earlier. Unknown status does not mean unexecuted, and cancellation cannot roll back mutations. For script writes, expected_revision from the last read also refuses a repeated or stale write after that window.',
       'Request stages are queued, dispatched, executing (plugin handler entered), and response_delivery (handler returned or admission rejected). executionOutcome is separate from waiter state and delivery outcome; handler observations do not prove user Luau instructions ran. A waiter timeout is not an execution deadline or rollback. Neither missing progress nor connection loss proves completion.',
     );
   }
@@ -325,11 +344,22 @@ export function serverInstructions(definitions: readonly ToolDefinition[]): stri
       'Start solo_playtest or multiplayer_playtest before targeting a live server or client. Read runtime output with get_runtime_logs.',
     );
   }
+  if (has('eval_server_runtime', 'eval_client_runtime')) {
+    instructions.push('Pass wait_until to eval_server_runtime or eval_client_runtime instead of sleeping until game state changes.');
+  }
+  if (has('get_request_status', 'solo_playtest')) {
+    instructions.push(
+      'A long call that returns state=pending with a requestId keeps running: collect its result with get_request_status, never by repeating the call.',
+    );
+  }
   if (has('search_assets', 'preview_asset', 'insert_asset')) {
     instructions.push('Search and preview untrusted Creator Store assets before inserting them.');
   }
   if (has('capture_screenshot', 'simulate_mouse_input')) {
     instructions.push('Capture a screenshot before sending mouse input so its pixel coordinates match the viewport.');
+  }
+  if (has('capture_video')) {
+    instructions.push('Use capture_video, not repeated capture_screenshot calls, to review motion such as cutscenes, tweens, or animations where it can record; a capture_screenshot contact sheet (frames with grid) is a cheap short sample that works everywhere.');
   }
   if (has('selection', 'capture_screenshot')) {
     instructions.push(
@@ -394,12 +424,12 @@ export function createToolServer(options: McpRuntimeOptions): McpServer {
             args as Record<string, unknown>,
             { signal: context.mcpReq.signal },
           );
-          return normalizeToolResult(raw, options.era);
+          return withErrorText(normalizeToolResult(raw, options.era));
         } catch (error) {
-          return normalizeToolResult({
+          return withErrorText(normalizeToolResult({
             content: [{ type: 'text', text: JSON.stringify(publicToolErrorBody(definition.name, error)) }],
             isError: true,
-          }, options.era);
+          }, options.era));
         }
       },
     );

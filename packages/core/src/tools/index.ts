@@ -1,11 +1,12 @@
 import { readRbxmInput } from '../rbxm-input.js';
 import { StudioHttpClient } from './studio-client.js';
-import { BridgeService, isValidOperationId, MAX_OPERATION_ID_LENGTH, MAX_OPERATION_WAIT_MS, RequestFailure, RoutingFailure, StudioOperationError } from '../bridge-service.js';
+import { BridgeService, isValidOperationId, MAX_OPERATION_ID_LENGTH, MAX_OPERATION_WAIT_MS, MultiplayerGroupInUseError, RequestFailure, RoutingFailure, StudioOperationError } from '../bridge-service.js';
 import type { PublicStudioPeer, RequestStatus, StudioPeer } from '../bridge-service.js';
 import { studioAuthForProcess } from '../studio-log.js';
 import {
   openCloudAssetUploadLimitBytes,
   OpenCloudClient,
+  OpenCloudOperationError,
   type AssetOperationResponse,
   type AssetSearchParams,
   type CreatorStoreSearchCategory,
@@ -17,6 +18,7 @@ import {
   parseStudioWorkingDirectory,
   StudioInstanceManager,
   type ManagedStudioInstance,
+  type PlaytestProcessListing,
   type StudioLaunchSource,
 } from '../studio-instance-manager.js';
 import {
@@ -29,6 +31,7 @@ import { findBuiltInStudioSkill, loadBuiltInStudioSkills } from '../studio-skill
 import { ENGINE_LESSONS } from '../knowledge/engine-lessons.js';
 import { runManageExperience } from './experience.js';
 import { runManageMonetization } from './monetization.js';
+import { describePlaytestStartFailure } from './playtest-start-errors.js';
 import { SCRIPT_CLASS_FILTERS } from './definitions.js';
 import { rgbaToJpeg } from '../jpeg-encoder.js';
 import { rgbaToPng } from '../png-encoder.js';
@@ -40,11 +43,25 @@ import {
   findViewportRect,
   hostCaptureUnsupportedReason,
   isHostCaptureDisabled,
+  isHostCapturePreferred,
   isHostCaptureSupported,
+  isNativeLinuxHost,
   isUniformFrame,
+  linuxHostCaptureUnavailableReason,
+  locateViewportInFrame,
   prepareHostWindowCapture,
+  saveViewportMarkerFrame,
 } from '../host-capture.js';
-import type { HostCaptureResult, HostWindowIdentity, ViewportRect } from '../host-capture.js';
+import type { HostCaptureOptions, HostCaptureResult, HostWindowIdentity, ViewportMarkerHint, ViewportRect } from '../host-capture.js';
+import { composeContactSheet, type ContactSheet } from '../contact-sheet.js';
+import {
+  createFfmpegVideoBackend,
+  defaultVideoPath,
+  ffmpegCommand,
+  pruneDefaultVideos,
+  videoRecordingUnsupportedReason,
+} from '../video-recorder.js';
+import type { CaptureSource, MediaInfo, VideoRecorderBackend, VideoRecordingExit, VideoRecordingProcess } from '../video-recorder.js';
 import { analyzeMicroProfilerCapture } from '../micro-profiler/analysis.js';
 import {
   CaptureTransferError,
@@ -63,11 +80,13 @@ import {
   resolveCapturePath,
   SERVER_CHUNK_BYTES,
   windowFromRecording,
+  writeCaptureFile,
   writeWindowSidecar,
 } from '../micro-profiler/capture.js';
 import type { PaceCaptureChunk } from '../micro-profiler/capture.js';
 import { createHash, randomUUID } from 'crypto';
-import { ReferenceUploads } from './reference-uploads.js';
+import { ReferenceUploadError, ReferenceUploads } from './reference-uploads.js';
+import { publicToolErrorBody } from '../mcp-runtime.js';
 import type { ReferenceUploadAttempt, ReferenceUploadCheckpoint, ReferenceUploadProgress, ReferenceUploadView } from './reference-uploads.js';
 import * as fs from 'fs';
 import * as os from 'os';
@@ -97,6 +116,7 @@ export interface ScriptEdit {
 }
 
 export const MAX_SCRIPT_EDITS = 100;
+const PLUGIN_CONNECTION_TIMEOUT_REASON = 'Studio launched, but the MCP plugin did not connect before timeout.';
 
 type RawImageCaptureResponse = {
   success?: boolean;
@@ -112,6 +132,8 @@ type RawImageCaptureResponse = {
   // size is the framebuffer, twice this on a Retina display.
   viewportWidth?: number;
   viewportHeight?: number;
+  screenWidth?: number;
+  screenHeight?: number;
   data?: string;
   instancePath?: string;
   instanceName?: string;
@@ -137,14 +159,37 @@ type ViewportMarkerResponse = {
   viewportWidth?: number;
   viewportHeight?: number;
   markerSize?: number;
+  markerLayout?: string;
 };
 
 type HostViewportCaptureResult =
   | { success: true; response: RawImageCaptureResponse }
   | { success: false; error: string };
 
+// One viewport frame before encoding; hostNote explains how it was captured.
+type RawViewportCaptureOk = {
+  success: true;
+  response: RawImageCaptureResponse;
+  hostNote: string;
+  studioFastPathUnavailable?: string;
+  // Set when a Device Simulator capture was resampled to the full device screen.
+  deviceScreen?: { width: number; height: number };
+};
+type RawViewportCapture = RawViewportCaptureOk | { success: false; error: string; studioFastPathUnavailable?: string };
+
+// `atMs` is when the frame was taken, relative to the first frame.
+type ViewportFramesCapture =
+  | { success: true; frames: Array<{ capture: RawViewportCaptureOk; atMs: number }> }
+  | { success: false; error: string; studioFastPathUnavailable?: string };
+
+export type ScreenshotSequenceOptions = { frames?: number; interval_ms?: number; grid?: boolean };
+
 // Injection seam so tests can stand in for the host OS helper.
-export type HostWindowCaptureFn = (titleHint?: string, expectedIdentity?: HostWindowIdentity) => Promise<HostCaptureResult>;
+export type HostWindowCaptureFn = (
+  titleHint?: string,
+  expectedIdentity?: HostWindowIdentity,
+  options?: HostCaptureOptions,
+) => Promise<HostCaptureResult>;
 
 function sameHostWindowIdentity(actual: HostWindowIdentity | undefined, expected: HostWindowIdentity): boolean {
   return actual?.windowId === expected.windowId && actual.processId === expected.processId
@@ -156,12 +201,60 @@ function sameHostWindowIdentity(actual: HostWindowIdentity | undefined, expected
 // panels of equal width), and re-locating the viewport costs one extra capture.
 const HOST_VIEWPORT_RECT_TTL_MS = 60_000;
 
+const VIDEO_ACTIONS = ['record', 'start', 'stop', 'storyboard'] as const;
+type VideoAction = typeof VIDEO_ACTIONS[number];
+const VIDEO_DEFAULT_DURATION_MS = 5_000;
+const VIDEO_MIN_DURATION_MS = 500;
+// action=record holds the tool call open; longer takes use start/stop.
+const VIDEO_MAX_DURATION_MS = 30_000;
+// action=start stops itself after this, so a forgotten stop cannot fill the disk.
+const VIDEO_START_MAX_DURATION_MS = 300_000;
+const VIDEO_DEFAULT_FPS = 30;
+const VIDEO_MAX_FPS = 60;
+const VIDEO_DEFAULT_STORYBOARD_FRAMES = 9;
+const VIDEO_MAX_STORYBOARD_FRAMES = 25;
+// Wide enough for legible 3-across tiles, small enough for a vision model's input.
+const VIDEO_STORYBOARD_MAX_WIDTH = 1536;
+const VIDEO_START_GRACE_MS = 750;
+
+type ActiveVideoRecording = {
+  instanceId: string;
+  targetRole: string;
+  outputPath: string;
+  ffmpegPath: string;
+  encoder: string;
+  source: CaptureSource;
+  fps: number;
+  maxDurationMs: number;
+  storyboardFrames: number;
+  startedAt: number;
+  process: VideoRecordingProcess;
+  exit?: VideoRecordingExit;
+};
+
+type VideoViewportLocation =
+  | {
+    success: true; windowId: number; x11Session?: HostWindowIdentity['x11Session']; source: CaptureSource;
+    rect: ViewportRect; frameWidth: number; frameHeight: number;
+  }
+  | { success: false; error: string };
+
+function isVideoAction(value: unknown): value is VideoAction {
+  return typeof value === 'string' && (VIDEO_ACTIONS as readonly string[]).includes(value);
+}
+
+function clampedInteger(value: unknown, name: string, min: number, max: number, fallback: number): number {
+  if (value === undefined) return fallback;
+  if (typeof value !== 'number' || !Number.isFinite(value)) throw new Error(`${name} must be a number`);
+  return Math.min(max, Math.max(min, Math.floor(value)));
+}
+
 type ToolContent =
   | { type: 'text'; text: string }
   | { type: 'image'; data: string; mimeType: string }
   | { type: 'audio'; data: string; mimeType: string };
 
-type EncodedViewportCapture = {
+type EncodedViewportImage = {
   success: true;
   width: number;
   height: number;
@@ -175,7 +268,9 @@ type EncodedViewportCapture = {
   message: string;
   source?: string;
   studioFastPathUnavailable?: string;
-} | {
+};
+
+type EncodedViewportCapture = EncodedViewportImage | {
   success: false;
   error: string;
   studioFastPathUnavailable?: string;
@@ -217,6 +312,10 @@ type StudioToolResponse = Record<string, unknown> & {
 };
 
 const MAX_INLINE_IMAGE_BYTES = 6_000_000;
+const MAX_SCREENSHOT_FRAMES = 16;
+const DEFAULT_SCREENSHOT_INTERVAL_MS = 500;
+const MAX_SCREENSHOT_INTERVAL_MS = 5_000;
+const MAX_SCREENSHOT_SEQUENCE_MS = 20_000;
 const MAX_MATRIX_IMAGE_BYTES = 8_000_000;
 const DEFAULT_ASSET_AUDIO_PREVIEWS = 3;
 const MAX_ASSET_AUDIO_PREVIEWS = 5;
@@ -226,6 +325,21 @@ const DEFAULT_ASSET_PREVIEW_DEPTH = 4;
 const MAX_ASSET_PREVIEW_HIERARCHY_NODES = 100;
 const MAX_SEARCH_ASSET_DESCRIPTION_LENGTH = 240;
 const ROBLOX_CREATOR_USER_ID = 1;
+
+export type UploadCreator = { userId: string } | { groupId: string };
+
+// Creator for an asset upload. Explicit arguments replace the environment
+// defaults entirely (groupId wins when both are passed); otherwise
+// ROBLOX_CREATOR_GROUP_ID wins over ROBLOX_CREATOR_USER_ID.
+export function resolveUploadCreator(userId?: string, groupId?: string): UploadCreator | undefined {
+  if (groupId) return { groupId };
+  if (userId) return { userId };
+  const envGroupId = process.env.ROBLOX_CREATOR_GROUP_ID;
+  if (envGroupId) return { groupId: envGroupId };
+  const envUserId = process.env.ROBLOX_CREATOR_USER_ID;
+  if (envUserId) return { userId: envUserId };
+  return undefined;
+}
 const MAX_DEVICE_MATRIX_ENTRIES = 6;
 const MAX_NETWORK_PACKET_LOSS_PERCENT = 0.5;
 const GREP_SCRIPTS_TIMEOUT_MS = 120_000;
@@ -391,8 +505,72 @@ function downscaleRgbaResponse(response: RawImageCaptureResponse, factor: number
   };
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+// Under the Device Simulator the plugin reports the full device screen, the
+// space VirtualInput reads (safe-area insets included). StudioCaptureService
+// squeezes that screen into the viewport size and CaptureService returns it
+// unsqueezed but smaller, so either image is resampled to the screen size.
+// A plugin-side transport downscale (width < nativeWidth) is kept in proportion,
+// with nativeWidth/Height becoming the screen size so the downscale message
+// maps back to screen pixels. Returns undefined when nothing needs resampling.
+function resampleCaptureToDeviceScreen(response: RawImageCaptureResponse): RawImageCaptureResponse | undefined {
+  const { screenWidth, screenHeight, width, height, data } = response;
+  if (!screenWidth || !screenHeight || !width || !height || !data || response.source === 'host-window') return undefined;
+  const targetWidth = Math.max(1, Math.round(screenWidth * width / (response.nativeWidth ?? width)));
+  const targetHeight = Math.max(1, Math.round(screenHeight * height / (response.nativeHeight ?? height)));
+
+  let source: { width: number; height: number; rgba: Buffer };
+  if (response.encoding === 'png') {
+    source = decodePngBase64ToRgba(data);
+  } else {
+    source = { width, height, rgba: Buffer.from(data, 'base64') };
+    if (source.rgba.length !== width * height * 4) {
+      throw new Error(`raw capture is ${source.rgba.length} bytes, expected ${width * height * 4} for ${width}x${height}`);
+    }
+  }
+  const resampled = cropToViewport(
+    source.rgba, source.width, source.height,
+    { x: 0, y: 0, width: source.width, height: source.height },
+    targetWidth, targetHeight,
+  );
+  return {
+    ...response,
+    encoding: 'rgba8',
+    width: resampled.width,
+    height: resampled.height,
+    nativeWidth: screenWidth,
+    nativeHeight: screenHeight,
+    data: resampled.rgba.toString('base64'),
+  };
+}
+
+// An aborted signal rejects with its reason at once, so cancelled waits stop polling.
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  const { promise, resolve, reject } = Promise.withResolvers<void>();
+  if (signal?.aborted) {
+    reject(signal.reason);
+    return promise;
+  }
+  const onAbort = () => {
+    clearTimeout(timer);
+    reject(signal?.reason);
+  };
+  const timer = setTimeout(() => {
+    signal?.removeEventListener('abort', onAbort);
+    resolve();
+  }, ms);
+  signal?.addEventListener('abort', onAbort, { once: true });
+  return promise;
+}
+
+// Resolves with the promise's value if it settles within ms, otherwise undefined.
+async function settledWithin<T>(promise: Promise<T>, ms: number): Promise<T | undefined> {
+  const timeout = Promise.withResolvers<undefined>();
+  const timer = setTimeout(() => timeout.resolve(undefined), ms);
+  try {
+    return await Promise.race([promise, timeout.promise]);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 function errorMessage(error: unknown): string {
@@ -466,6 +644,168 @@ function roleOrder(role: string): number {
   if (role === 'server') return 1;
   const client = /^client-(\d+)$/.exec(role);
   return client ? 2 + Number(client[1]) : Number.MAX_SAFE_INTEGER;
+}
+
+// Budgeted tools (playtest lifecycle, wait_until) answer with text items only.
+type ToolCallResult = { content: Array<{ type: string; text: string }> };
+
+type ToolJobOutcome = { result: ToolCallResult } | { error: unknown };
+
+// A long tool call that outlived its response budget; get_request_status collects it.
+type ToolJob = {
+  id: string;
+  key: string;
+  tool: string;
+  action: string;
+  startedAt: number;
+  done: Promise<void>;
+  settledAt?: number;
+  outcome?: ToolJobOutcome;
+};
+
+const TOOL_JOB_RETENTION_MS = 5 * 60_000;
+const DEFAULT_RESPONSE_BUDGET_MS = 25_000;
+
+// MCP clients give up on a call after their own timeout and then report an
+// unknown outcome. Long calls therefore answer within this budget: work still
+// running returns a request id and get_request_status delivers the result.
+export function responseBudgetMs(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = Number(env.ROBLOX_STUDIO_MCP_RESPONSE_BUDGET_MS);
+  return Number.isFinite(raw) && raw > 0
+    ? Math.min(3_600_000, Math.max(1_000, Math.floor(raw)))
+    : DEFAULT_RESPONSE_BUDGET_MS;
+}
+
+/** eval_*_runtime wait_until polling. */
+export interface RuntimeWaitOptions {
+  wait_until?: string;
+  timeout_s?: number;
+  poll_ms?: number;
+}
+
+const DEFAULT_WAIT_TIMEOUT_S = 20;
+// One wait never outlasts the longest operation wait the bridge allows.
+const MAX_WAIT_TIMEOUT_S = MAX_OPERATION_WAIT_MS / 1000;
+const DEFAULT_WAIT_POLL_MS = 250;
+// Every probe is a bridge request whose result the bridge retains (at most
+// 1024, oldest evicted first). Long waits poll less often so one wait cannot
+// push out much of that history, including a retry's operation_id result.
+const MAX_WAIT_PROBES = 120;
+// Fallback for replies that lack the plugin's eval shape: Luau parse
+// diagnostics as `<chunk>:<line>: <message>`, or the engine's generic load failure.
+const WAIT_COMPILE_ERROR = /:\d+: (Expected|Incomplete statement|Malformed|Unfinished|Cannot use '\.\.\.' outside of a vararg function|String literal contains malformed escape sequence|Attribute name is missing)|Requested module experienced an error while loading/;
+// Plugin-side failures that also come back without output but are not about the payload.
+const EVAL_SETUP_ERROR = /^(ModuleScript Source set failed|Eval bridge returned invalid result)/;
+const PLAYTEST_NOT_RUNNING_ERROR = 'eval_*_runtime requires a running playtest.';
+const WAIT_YIELD_ERROR = 'wait_until must not yield';
+
+export type WaitProbeForm = 'expression' | 'block';
+
+// Runs the condition as a function body (the expression form gains
+// `return (...)`), keeping it on line 1 so Luau error lines match the caller's
+// text. The body runs in a coroutine: a condition that waits (WaitForChild,
+// task.wait, InvokeServer) is cancelled instead of staying suspended in the
+// game and holding a plugin request slot after the probe gave up on it. The
+// reply is "T" or "F" for truthiness followed by the value as text.
+export function buildWaitProbe(condition: string, form: WaitProbeForm = 'expression'): string {
+  const body = form === 'block' ? condition : `return (${condition}\n)`;
+  return `local __mcp_thread = coroutine.create(function() ${body}
+end)
+local __mcp_ok, __mcp_value = coroutine.resume(__mcp_thread)
+if coroutine.status(__mcp_thread) ~= "dead" then
+\ttask.cancel(__mcp_thread)
+\terror("${WAIT_YIELD_ERROR}: it called something that waits, such as WaitForChild, task.wait, or a remote call. Use FindFirstChild or read the state directly.", 0)
+end
+if not __mcp_ok then
+\terror(__mcp_value, 0)
+end
+local __mcp_shown
+if type(__mcp_value) == "table" then
+\tlocal ok, encoded = pcall(function() return game:GetService("HttpService"):JSONEncode(__mcp_value) end)
+\t__mcp_shown = if ok then encoded else tostring(__mcp_value)
+else
+\t__mcp_shown = tostring(__mcp_value)
+end
+return (if __mcp_value then "T" else "F") .. __mcp_shown`;
+}
+
+// The plugin's eval wrapper runs the payload under xpcall and always replies
+// with an output array, so a runtime error carries output. A payload that
+// failed to load (a compile error) is reported by the bridge without one.
+function isWaitLoadFailure(response: StudioToolResponse): boolean {
+  if (response.ok === true || response.output !== undefined) return false;
+  const error = typeof response.error === 'string' ? response.error : '';
+  if (response.bridge === 'ok' && response.ok === false) return !EVAL_SETUP_ERROR.test(error);
+  return WAIT_COMPILE_ERROR.test(error);
+}
+
+// Resolves after ms, or as soon as the signal aborts.
+function sleepUnlessAborted(ms: number, signal: AbortSignal | undefined): Promise<void> {
+  if (signal?.aborted) return Promise.resolve();
+  const { promise, resolve } = Promise.withResolvers<void>();
+  const timer = setTimeout(done, ms);
+  signal?.addEventListener('abort', done, { once: true });
+  function done() {
+    clearTimeout(timer);
+    signal?.removeEventListener('abort', done);
+    resolve();
+  }
+  return promise;
+}
+
+/** A runtime peer a playtest start proved can run code, and how to address it. */
+export interface RuntimeReadyTarget {
+  role: string;
+  instance_id: string;
+  target: string;
+}
+
+type RuntimeEvalReadiness = {
+  ready: boolean;
+  targets: RuntimeReadyTarget[];
+  notReady: Array<{ role: string; error: string }>;
+  // Pending roles that left the scope; they do not come back, so the wait ended early.
+  disconnected: string[];
+};
+
+// Readiness-failure fields: the playtest is left running so the agent can inspect it,
+// and a new start is refused until it stops.
+function runtimeEvalFailure(readiness: RuntimeEvalReadiness, running: boolean, stopAction: 'stop' | 'end') {
+  return {
+    running,
+    disconnected: readiness.disconnected.length > 0 ? readiness.disconnected : undefined,
+    recoveryHint: !running
+      ? undefined
+      : readiness.disconnected.length > 0
+        ? `The playtest is still running without ${readiness.disconnected.join(', ')}; ${stopAction} the playtest and start again to get every peer back.`
+        : `The playtest is still running; retry eval on the notReady peers, or ${stopAction} the playtest before starting again.`,
+  };
+}
+
+const DEFAULT_PLAYTEST_READY_TIMEOUT_S = 90;
+
+// How long end lets test windows exit on their own after EndTest before closing them.
+const TEST_WINDOW_EXIT_GRACE_MS = 5000;
+
+type MultiplayerStartWait = { ok: boolean; roles: string[]; timedOut: boolean; phase?: string; error?: unknown };
+
+/** Test windows of a multiplayer playtest found by process, and what closing them did. */
+type TestWindowCleanup =
+  | { tracked: false; reason: string }
+  // listingFailed: this platform lists windows, but a listing failed, so none can be ruled out.
+  | { tracked: true; found: number; closed: number; remaining: number; listingFailed?: boolean; error?: string };
+
+function testWindowFields(cleanup: TestWindowCleanup): Record<string, unknown> {
+  if (!cleanup.tracked) return {};
+  return {
+    ...(cleanup.closed > 0 ? { closedTestWindows: cleanup.closed } : {}),
+    ...(cleanup.remaining > 0 ? { remainingTestWindows: cleanup.remaining } : {}),
+    ...(cleanup.error !== undefined ? { testWindowError: cleanup.error } : {}),
+  };
+}
+
+function isActiveMultiplayerPhase(phase: string | undefined): boolean {
+  return phase === 'starting' || phase === 'running';
 }
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {
@@ -1064,6 +1404,13 @@ error("Unsupported network simulation operation: " .. tostring(operation), 0)
 `.trim();
 }
 
+// Only for captures resampled into the simulated device screen.
+function deviceScreenNote(screen?: { width: number; height: number }): string {
+  if (screen === undefined) return '';
+  return ` Device Simulator: the image covers the full ${screen.width}x${screen.height} device screen ` +
+    `(safe-area insets included), the same space simulate_mouse_input uses, so coordinates read off it work directly.`;
+}
+
 function normalizeDeviceSimulatorResolution(value: unknown): { width: number; height: number } | undefined {
   if (value === undefined) return undefined;
   if (typeof value !== 'object' || value === null || Array.isArray(value)) {
@@ -1312,6 +1659,8 @@ error("Unsupported device simulator operation: " .. tostring(opts.operation), 0)
 
 const isClientRole = (role: string): boolean => /^client-\d+$/.test(role);
 const isRuntimeRole = (role: string): boolean => role === 'server' || isClientRole(role);
+// Matches the plugin broker's BRIDGE_STALE_SECONDS: ten missed heartbeats.
+const CLIENT_BRIDGE_STALE_MS = 10_000;
 const anyRole = (): boolean => true;
 // Targets that address a whole scope rather than one Peer.
 const SCOPE_WIDE_TARGETS: ReadonlySet<string> = new Set(['all', 'all-clients', 'edit-and-clients']);
@@ -1338,6 +1687,15 @@ export class RobloxStudioTools {
   // The last capture_screenshot of each peer (`instanceId|role`): viewport pixels per image pixel,
   // so the mouse tools can take x/y as read off that image (this fork).
   private screenshotInputScales = new Map<string, { x: number; y: number }>();
+  // Linux: the Studio process behind each Instance. Registry lookups expire; a
+  // process found through its window does not.
+  private hostCaptureProcessIds = new Map<string, { processId?: number; cachedAt: number; discovered?: boolean }>();
+  // capture_video: the host recorder and the recordings started per Instance.
+  private videoRecorder: VideoRecorderBackend = createFfmpegVideoBackend();
+  private videoRecordings = new Map<string, ActiveVideoRecording>();
+  private videoStarting = new Set<string>();
+  // How long start waits for the encoder to fail fast before reporting success.
+  private videoStartGraceMs = VIDEO_START_GRACE_MS;
   // generate_model reference images, shared by retries under one operation ID.
   private readonly referenceUploads = new ReferenceUploads();
   // Paces chunks of a client capture copied through the client broker.
@@ -1345,6 +1703,8 @@ export class RobloxStudioTools {
   // set_network_profile calls made before Play, by instance (this fork): applied to clients as they
   // join. A client-N profile is applied once; an all-clients one to every client until replaced.
   private readonly _pendingNetworkProfiles = new Map<string, { target: string; profile: string; values: NetworkProfileValues }>();
+  // Long calls that outlived the response budget, by request id.
+  private readonly toolJobs = new Map<string, ToolJob>();
 
   constructor(bridge: BridgeService) {
     this.client = new StudioHttpClient(bridge);
@@ -1399,6 +1759,85 @@ export class RobloxStudioTools {
     }
     if (filter) body.domain = filter;
     return this._textResult(body);
+  }
+
+  // Runs `run` but answers within the response budget. A call still running then
+  // returns a pending request id; an identical call (same key) while it runs
+  // joins it instead of starting the work again.
+  // `run` gets a signal that follows the caller's only while the caller waits.
+  // Once the call answers pending, the work belongs to the server: an HTTP
+  // transport closes after sending that answer and aborts the request's signal
+  // ("Connection closed"), which must not stop the work it reported as running.
+  private async _withinResponseBudget(
+    tool: string,
+    action: string,
+    args: unknown[],
+    run: (signal: AbortSignal | undefined) => Promise<ToolCallResult>,
+    signal?: AbortSignal,
+  ): Promise<ToolCallResult> {
+    const now = Date.now();
+    for (const [id, job] of this.toolJobs) {
+      if (job.settledAt !== undefined && now - job.settledAt > TOOL_JOB_RETENTION_MS) this.toolJobs.delete(id);
+    }
+    const key = JSON.stringify([tool, action, ...args]);
+    let job = [...this.toolJobs.values()].find((candidate) => candidate.key === key && candidate.outcome === undefined);
+    const joined = job !== undefined;
+    let detachCaller = () => {};
+    if (!job) {
+      let jobSignal: AbortSignal | undefined;
+      if (signal) {
+        const jobAbort = new AbortController();
+        const forward = () => jobAbort.abort(signal.reason);
+        if (signal.aborted) forward();
+        else {
+          signal.addEventListener('abort', forward, { once: true });
+          detachCaller = () => signal.removeEventListener('abort', forward);
+        }
+        jobSignal = jobAbort.signal;
+      }
+      const created: ToolJob = { id: `${tool}-${randomUUID()}`, key, tool, action, startedAt: now, done: Promise.resolve() };
+      created.done = run(jobSignal).then(
+        (result) => { created.outcome = { result }; },
+        (error: unknown) => { created.outcome = { error }; },
+      ).finally(() => { created.settledAt = Date.now(); });
+      this.toolJobs.set(created.id, created);
+      job = created;
+    }
+    const outcome = await this._awaitToolJob(job, responseBudgetMs());
+    detachCaller();
+    if (!outcome) return this._textResult({ ...this._toolJobPending(job), ...(joined ? { joinedRunningCall: true } : {}) });
+    // A result delivered within the budget is not kept; a joined caller leaves it for the first.
+    if (!joined) this.toolJobs.delete(job.id);
+    if ('error' in outcome) throw outcome.error;
+    return outcome.result;
+  }
+
+  private async _awaitToolJob(job: ToolJob, waitMs: number, signal?: AbortSignal): Promise<ToolJobOutcome | undefined> {
+    if (job.outcome || waitMs <= 0 || signal?.aborted) return job.outcome;
+    const timer = Promise.withResolvers<void>();
+    const handle = setTimeout(timer.resolve, waitMs);
+    const abort = () => timer.resolve();
+    signal?.addEventListener('abort', abort, { once: true });
+    try {
+      await Promise.race([job.done, timer.promise]);
+    } finally {
+      clearTimeout(handle);
+      signal?.removeEventListener('abort', abort);
+    }
+    return job.outcome;
+  }
+
+  private _toolJobPending(job: ToolJob): Record<string, unknown> {
+    return {
+      requestId: job.id,
+      state: 'pending',
+      outcome: 'pending',
+      tool: job.tool,
+      action: job.action,
+      elapsedMs: Date.now() - job.startedAt,
+      // get_request_status rejects wait_ms above MAX_OPERATION_WAIT_MS, so never suggest more.
+      next: `Still running. Call get_request_status with request_id="${job.id}" and wait_ms up to ${Math.min(responseBudgetMs(), MAX_OPERATION_WAIT_MS)} to collect the result. Do not repeat the ${job.tool} call.`,
+    };
   }
 
   async getRobloxSkills(action: string, name?: string) {
@@ -1549,7 +1988,7 @@ export class RobloxStudioTools {
     target: string | TargetChoice | undefined,
     instance_id: string | undefined,
     signal: AbortSignal | undefined,
-    dispatch: (targetPeerId: string) => Promise<T>,
+    dispatch: (targetPeerId: string, targetInstanceId: string) => Promise<T>,
   ): Promise<T> {
     const refresh = this.bridge.refreshTopologyForRouting(signal);
     if (refresh) await refresh;
@@ -1563,7 +2002,7 @@ export class RobloxStudioTools {
         data: this._routingErrorData(),
       });
     }
-    return dispatch(resolved.targetPeerId);
+    return dispatch(resolved.targetPeerId, resolved.targetInstanceId);
   }
 
   // A grouped runtime process ID, or its role-suffixed Instance ID, names exactly
@@ -2008,10 +2447,12 @@ export class RobloxStudioTools {
     connectedAfter: number,
     requiredRoles: string[],
     timeoutSec = 60,
-  ): Promise<{ ok: boolean; roles: string[]; timedOut: boolean }> {
+    soloStart?: { editPeerId: string; testId: string },
+    signal?: AbortSignal,
+  ): Promise<{ ok: boolean; roles: string[]; timedOut: boolean; studioError?: string }> {
     const deadline = Date.now() + timeoutSec * 1000;
     while (Date.now() < deadline) {
-      const refresh = this.bridge.refreshTopologyForRouting();
+      const refresh = this.bridge.refreshTopologyForRouting(signal);
       if (refresh) await refresh;
       const peers = this.bridge.getPeersInScope(instanceId);
       const roles = peers.map((peer) => peer.role);
@@ -2023,7 +2464,13 @@ export class RobloxStudioTools {
       if (requiredRoles.every((role) => freshRoles.has(role))) {
         return { ok: true, roles, timedOut: false };
       }
-      await sleep(250);
+      if (soloStart) {
+        const studioError = await this._soloStartFailure(soloStart.editPeerId, soloStart.testId, deadline);
+        if (studioError !== undefined) {
+          return { ok: false, roles: this._rolesForScope(instanceId), timedOut: false, studioError };
+        }
+      }
+      await sleep(250, signal);
     }
     return {
       ok: false,
@@ -2032,6 +2479,70 @@ export class RobloxStudioTools {
     };
   }
 
+  // Studio's error when the edit plugin's Execute*Async call for this start failed.
+  private async _soloStartFailure(editPeerId: string, testId: string, deadline: number): Promise<string | undefined> {
+    try {
+      const remainingMs = Math.max(1, Math.min(1000, deadline - Date.now()));
+      const editState = await this._requestPeer('/api/multiplayer-test-state', {}, editPeerId, remainingMs);
+      const solo: unknown = editState?.soloSession;
+      if (solo === null || typeof solo !== 'object' || !('testId' in solo) || !('phase' in solo)) return undefined;
+      if (solo.testId !== testId || solo.phase !== 'failed') return undefined;
+      return 'error' in solo && typeof solo.error === 'string' ? solo.error : 'unknown error';
+    } catch {
+      // The edit peer may be busy while Studio starts the test; readiness decides.
+      return undefined;
+    }
+  }
+
+  // A registered runtime peer can still be loading; a trivial eval proves its
+  // DataModel runs code. Polls every runtime role until each answers, one leaves,
+  // or the deadline passes, then lists how to address each peer that answered.
+  private async _waitForRuntimeEval(instanceId: string, deadline: number, signal?: AbortSignal): Promise<RuntimeEvalReadiness> {
+    const pending = new Map(this._runtimeTargetsForScope(instanceId).map((peer) => [peer.role, 'not probed']));
+    const disconnected: string[] = [];
+    let firstPass = true;
+    probing: while (pending.size > 0) {
+      for (const role of [...pending.keys()]) {
+        // A playtest peer that left does not return, so polling it until the deadline is pointless.
+        const present = new Set(this._runtimeTargetsForScope(instanceId).map((peer) => peer.role));
+        disconnected.push(...[...pending.keys()].filter((pendingRole) => !present.has(pendingRole)));
+        if (disconnected.length > 0) {
+          for (const gone of disconnected) pending.set(gone, 'disconnected before answering an eval');
+          break probing;
+        }
+        // Every peer gets one probe of at least 1 s, so a start that detected its
+        // peers just before the deadline still reports a real error for each one.
+        // Later probes never start, nor run, past the deadline.
+        const remainingMs = deadline - Date.now();
+        if (!firstPass && remainingMs <= 0) break probing;
+        const timeoutMs = firstPass ? Math.max(1_000, Math.min(5_000, remainingMs)) : Math.min(5_000, remainingMs);
+        try {
+          const response = await this._request('/api/eval-runtime', { code: 'return true' }, instanceId, role, timeoutMs, signal);
+          if (response.ok === true) pending.delete(role);
+          else pending.set(role, String(response.error ?? 'eval did not succeed'));
+        } catch (error) {
+          if (signal?.aborted) throw error;
+          pending.set(role, errorMessage(error));
+        }
+      }
+      firstPass = false;
+      if (pending.size === 0 || Date.now() >= deadline) break;
+      await sleep(250, signal);
+    }
+    // Solo runtime peers share the edit Instance ID and need target=<role>; grouped
+    // peers also answer to their role-suffixed ID. Passing both always works.
+    const grouped = this.bridge.getMultiplayerGroups().some((group) => group.instanceIds.includes(instanceId));
+    const peers = this._runtimeTargetsForScope(instanceId).filter((peer) => !pending.has(peer.role));
+    const targets = ['server', ...this._clientRolesForScope(instanceId)]
+      .flatMap((role) => peers.filter((peer) => peer.role === role))
+      .map((peer) => ({ role: peer.role, instance_id: grouped ? `${peer.instanceId}-${peer.role}` : peer.instanceId, target: peer.role }));
+    return {
+      ready: pending.size === 0,
+      targets,
+      notReady: [...pending].map(([role, error]) => ({ role, error })),
+      disconnected,
+    };
+  }
 
   async getFileTree(path: string = '', instance_id?: string) {
     const response = await this._callSingle('/api/file-tree', { path }, undefined, instance_id);
@@ -2560,47 +3071,139 @@ export class RobloxStudioTools {
     return { content: [{ type: 'text', text: JSON.stringify(response) }] };
   }
 
-  async evalServerRuntime(code: string, instance_id?: string, operation_id?: string, options: EvalJobOptions = {}) {
+  async evalServerRuntime(code: string | undefined, instance_id?: string, operation_id?: string, options: EvalJobOptions & RuntimeWaitOptions = {}, signal?: AbortSignal) {
     if (options.job !== undefined) return this._evalJobStatus(options, 'server', instance_id);
     code = readLuauSource(code, options.file, 'eval_server_runtime');
-    if (!code) {
-      throw new Error('Code is required for eval_server_runtime');
+    if (!code && options.wait_until === undefined) {
+      throw new Error('eval_server_runtime requires code or wait_until (or file)');
     }
     const preludeError = await this._runEvalPrelude('server', 'server', instance_id);
-    const response = await this._callSingle('/api/eval-runtime', evalRequest(code, options), 'server', instance_id, undefined, undefined, operation_id);
-    return {
-      content: [
-        {
-          type: 'text',
-          text: JSON.stringify(preludeError === undefined ? response : { ...(response as object), prelude_error: preludeError })
-        }
-      ]
-    };
+    const result = await this._evalRuntime('eval_server_runtime', 'server', code, instance_id, operation_id, options, signal);
+    return withPreludeError(result, preludeError);
   }
 
-  async evalClientRuntime(code: string, target?: string, instance_id?: string, operation_id?: string, options: EvalJobOptions = {}) {
+  async evalClientRuntime(code: string | undefined, target?: string, instance_id?: string, operation_id?: string, options: EvalJobOptions & RuntimeWaitOptions = {}, signal?: AbortSignal) {
     if (target && !target.startsWith('client-')) {
       throw new Error(`eval_client_runtime requires target=client-N (got: ${target})`);
     }
     const clientChoice: TargetChoice = { requested: target, fallback: 'client-1', accepts: isClientRole };
     if (options.job !== undefined) return this._evalJobStatus(options, clientChoice, instance_id);
     code = readLuauSource(code, options.file, 'eval_client_runtime');
-    if (!code) {
-      throw new Error('Code is required for eval_client_runtime');
+    if (!code && options.wait_until === undefined) {
+      throw new Error('eval_client_runtime requires code or wait_until (or file)');
     }
     const preludeError = await this._runEvalPrelude('client', clientChoice, instance_id);
-    const response = await this._callSingle(
-      '/api/eval-runtime', evalRequest(code, options), clientChoice,
-      instance_id, undefined, undefined, operation_id,
-    );
-    return {
-      content: [
-        {
-          type: 'text',
-          text: JSON.stringify(preludeError === undefined ? response : { ...(response as object), prelude_error: preludeError })
+    const result = await this._evalRuntime('eval_client_runtime', clientChoice, code, instance_id, operation_id, options, signal);
+    return withPreludeError(result, preludeError);
+  }
+
+  // operation_id binds the one run of `code`; wait_until probes repeat, so they never carry it.
+  private async _evalRuntime(
+    tool: string,
+    target: string | TargetChoice,
+    code: string | undefined,
+    instance_id: string | undefined,
+    operation_id: string | undefined,
+    wait: EvalJobOptions & RuntimeWaitOptions,
+    signal: AbortSignal | undefined,
+  ): Promise<ToolCallResult> {
+    const condition = wait.wait_until;
+    if (condition === undefined) {
+      return this._textResult(await this._callSingle('/api/eval-runtime', evalRequest(code ?? '', wait), target, instance_id, undefined, undefined, operation_id));
+    }
+    if (typeof condition !== 'string' || !condition.trim()) {
+      throw new Error(`${tool} wait_until must be a non-empty Luau expression or code block`);
+    }
+    const timeoutS = wait.timeout_s ?? DEFAULT_WAIT_TIMEOUT_S;
+    if (typeof timeoutS !== 'number' || !Number.isFinite(timeoutS) || timeoutS <= 0 || timeoutS > MAX_WAIT_TIMEOUT_S) {
+      throw new Error(`${tool} timeout_s must be a number above 0 and at most ${MAX_WAIT_TIMEOUT_S}`);
+    }
+    const pollMs = wait.poll_ms ?? DEFAULT_WAIT_POLL_MS;
+    if (!Number.isInteger(pollMs) || pollMs < 50 || pollMs > 10_000) {
+      throw new Error(`${tool} poll_ms must be an integer from 50 to 10000`);
+    }
+    // Key on the target as the caller passed it: an omitted target routes by
+    // instance_id, so it can reach a different peer than an explicit client-N.
+    const requestedTarget = typeof target === 'string' ? target : target.requested;
+    return this._withinResponseBudget(tool, 'wait_until', [instance_id, requestedTarget, code, condition, timeoutS, pollMs, operation_id], async (signal) => {
+      const intervalMs = Math.max(pollMs, Math.ceil(timeoutS * 1000 / MAX_WAIT_PROBES));
+      const startedAt = Date.now();
+      const deadline = startedAt + timeoutS * 1000;
+      const finish = (body: Record<string, unknown>) => this._textResult({ ...body, elapsed_ms: Date.now() - startedAt });
+      // Once a request has been routed, a later routing failure means the peer
+      // left mid-wait; before that it is the caller's targeting error.
+      let routedRole: string | undefined;
+      const send = (data: { code: string }, timeoutMs?: number, requestSignal?: AbortSignal, operationId?: string) =>
+        this._withSinglePeer(target, instance_id, requestSignal, (targetPeerId) => {
+          routedRole = this.bridge.getPeerById(targetPeerId)?.role
+            ?? (typeof target === 'string' ? target : target.requested ?? target.fallback);
+          return this._requestPeer('/api/eval-runtime', data, targetPeerId, timeoutMs, requestSignal, operationId);
+        });
+      let codeResult: Record<string, unknown> = {};
+      if (code) {
+        const response = await send({ code }, undefined, undefined, operation_id);
+        if (response.ok !== true) {
+          return finish({ ...response, satisfied: false, polls: 0, error: `code failed, so wait_until was not polled: ${String(response.error ?? 'unknown error')}` });
         }
-      ]
-    };
+        codeResult = { code_result: response.result, code_output: response.output };
+      }
+      // The expression form runs first, so `return` inside a string, a comment, or
+      // a nested function stays part of the expression. Text that only loads as a
+      // block switches to the block form for the rest of the wait.
+      let form: WaitProbeForm = 'expression';
+      let probe = buildWaitProbe(condition, form);
+      let polls = 0;
+      let lastValue: string | undefined;
+      let lastError: string | undefined;
+      for (;;) {
+        signal?.throwIfAborted();
+        polls += 1;
+        try {
+          const response = await send({ code: probe }, Math.max(1_000, Math.min(10_000, deadline - Date.now())), signal);
+          const reply = response.ok === true && typeof response.result === 'string' ? response.result : undefined;
+          if (reply !== undefined && (reply.startsWith('T') || reply.startsWith('F'))) {
+            lastValue = reply.slice(1);
+            lastError = undefined;
+            if (reply.startsWith('T')) return finish({ ...codeResult, satisfied: true, value: lastValue, polls });
+          } else {
+            lastError = String(response.error ?? `unexpected eval reply: ${JSON.stringify(response)}`);
+            if (response.error === PLAYTEST_NOT_RUNNING_ERROR) {
+              return finish({ ...codeResult, satisfied: false, polls, error: `The playtest stopped while waiting: ${lastError}` });
+            }
+            if (isWaitLoadFailure(response)) {
+              if (form === 'expression' && /\breturn\b/.test(condition)) {
+                form = 'block';
+                probe = buildWaitProbe(condition, form);
+                continue;
+              }
+              return finish({ ...codeResult, satisfied: false, polls, error: `wait_until does not compile: ${lastError}` });
+            }
+            // Waiting again would only cancel the same yield again.
+            if (lastError.includes(WAIT_YIELD_ERROR)) {
+              return finish({ ...codeResult, satisfied: false, polls, value: lastValue, error: lastError });
+            }
+          }
+        } catch (error) {
+          if (signal?.aborted) throw error;
+          if (error instanceof RoutingFailure) {
+            if (routedRole === undefined) throw error;
+            return finish({ ...codeResult, satisfied: false, polls, value: lastValue, error: `The ${routedRole} peer is gone, so wait_until cannot finish: ${error.message}` });
+          }
+          lastError = errorMessage(error);
+        }
+        if (polls >= MAX_WAIT_PROBES || Date.now() + intervalMs >= deadline) break;
+        await sleepUnlessAborted(intervalMs, signal);
+      }
+      signal?.throwIfAborted();
+      return finish({
+        ...codeResult,
+        satisfied: false,
+        polls,
+        value: lastValue,
+        lastError,
+        error: `wait_until timed out after ${timeoutS}s: the condition never became truthy.`,
+      });
+    }, signal);
   }
 
   async setNetworkProfile(
@@ -3819,9 +4422,9 @@ export class RobloxStudioTools {
     let capturePath: string | undefined;
     let saveError: string | undefined;
     try {
-      capturePath = await resolveCapturePath(typeof outputPath === 'string' ? outputPath : undefined, role);
-      await fs.promises.mkdir(path.dirname(capturePath), { recursive: true });
-      await fs.promises.writeFile(capturePath, bytes);
+      const target = await resolveCapturePath(typeof outputPath === 'string' ? outputPath : undefined, role);
+      capturePath = target.path;
+      await writeCaptureFile(target, bytes);
       await writeWindowSidecar(capturePath, role, recording);
     } catch (error) {
       saveError = `Could not save the capture${capturePath ? ` to ${capturePath}` : ''}: ${errorMessage(error)}`;
@@ -3970,7 +4573,10 @@ export class RobloxStudioTools {
   }
 
 
-  private _matchesManagedLaunch(record: ManagedStudioInstance, instance: PublicStudioPeer): boolean {
+  private _matchesManagedLaunch(
+    record: ManagedStudioInstance,
+    instance: Pick<PublicStudioPeer, 'placeId' | 'placeName' | 'dataModelName'>,
+  ): boolean {
     if (record.source === 'published_place') {
       return record.placeId !== undefined && instance.placeId === record.placeId;
     }
@@ -4030,6 +4636,17 @@ export class RobloxStudioTools {
     return undefined;
   }
 
+  // The instance manager only knows the plugin never registered; a version
+  // rejection recorded during the launch window is the actionable cause.
+  private _managedFailureReason(record: ManagedStudioInstance): string | undefined {
+    if (record.failureReason !== PLUGIN_CONNECTION_TIMEOUT_REASON) return record.failureReason;
+    const rejection = this.bridge.getVersionRejections()
+      .filter((candidate) => candidate.role === 'edit' && candidate.rejectedAt >= record.launchedAt - 1000)
+      .filter((candidate) => this._matchesManagedLaunch(record, candidate))
+      .at(-1);
+    return rejection ? `Studio connected but was rejected: ${rejection.hint}` : record.failureReason;
+  }
+
   private _managedStatus(record: ManagedStudioInstance): Record<string, unknown> {
     const connected = record.instanceId
       ? this.bridge.getPublicPeers().filter((peer) => peer.instanceId === record.instanceId)
@@ -4069,7 +4686,7 @@ export class RobloxStudioTools {
       failed_at: record.failedAt ? new Date(record.failedAt).toISOString() : undefined,
       exited_at: record.exitedAt ? new Date(record.exitedAt).toISOString() : undefined,
       exit_code: record.exitCode,
-      failure_reason: record.failureReason,
+      failure_reason: this._managedFailureReason(record),
       connected: connected.length > 0,
       roles: connected.map((instance) => instance.role).sort(),
     };
@@ -4354,7 +4971,7 @@ export class RobloxStudioTools {
     const connected = await this._waitForManagedEditConnection(record, beforeKeys, timeoutMs);
     if (!connected) {
       if (record.state === 'launching') {
-        await this.instanceManager.markFailed(record, 'Studio launched, but the MCP plugin did not connect before timeout.');
+        await this.instanceManager.markFailed(record, PLUGIN_CONNECTION_TIMEOUT_REASON);
       }
       if (record.closedAt === undefined) {
         try {
@@ -4365,7 +4982,7 @@ export class RobloxStudioTools {
       }
       return this._textResult({
         ...this._managedStatus(record),
-        error: record.failureReason ?? 'Studio launched, but the MCP plugin did not connect before timeout.',
+        error: this._managedFailureReason(record) ?? PLUGIN_CONNECTION_TIMEOUT_REASON,
       });
     }
 
@@ -4378,7 +4995,14 @@ export class RobloxStudioTools {
     });
   }
 
-  async soloPlaytest(action: string, mode?: string, timeout?: number, instance_id?: string) {
+  async soloPlaytest(
+    action: string,
+    mode?: string,
+    timeout?: number,
+    instance_id?: string,
+    ready_timeout_s?: number,
+    signal?: AbortSignal,
+  ) {
     if (action !== 'start' && action !== 'stop' && action !== 'status') {
       throw new Error('solo_playtest requires action=start|stop|status');
     }
@@ -4397,52 +5021,72 @@ export class RobloxStudioTools {
     }
 
     if (action === 'start') {
-      if (mode !== 'play' && mode !== 'run') {
-        throw new Error('solo_playtest action=start requires mode=play|run');
+      const startMode = mode ?? 'play';
+      if (startMode !== 'play' && startMode !== 'run') {
+        throw new Error('solo_playtest mode must be play or run (default play)');
       }
-      const body = this._parseTextResult(await this.startPlaytest(mode, undefined, instance_id, timeout));
-      if (body.success === true && body.runtimeReady !== false) {
+      // The defaulted mode and the effective readiness timeout key the job, so two
+      // different starts never join one another.
+      const readyTimeoutS = ready_timeout_s ?? timeout;
+      return this._withinResponseBudget('solo_playtest', action, [instance_id, startMode, readyTimeoutS], async (jobSignal) => {
+        const body = this._parseTextResult(await this.startPlaytest(startMode, undefined, instance_id, readyTimeoutS, jobSignal));
+        if (body.success === true && body.runtimeReady !== false) {
+          return this._textResult({
+            success: true,
+            action,
+            mode: startMode,
+            message: 'Playtest started; every runtime peer answered an eval.',
+            roles: Array.isArray(body.roles) ? body.roles : undefined,
+            targets: body.targets,
+            elapsedMs: body.elapsedMs,
+          });
+        }
+        return this._textResult({
+          // Keep lifecycle diagnostics on failures; only successful responses are brief.
+          ...body,
+          success: false,
+          action,
+          mode: startMode,
+          error: body.error ?? 'start_failed',
+          message: body.success !== true
+            ? body.message ?? 'Playtest did not start.'
+            : Array.isArray(body.disconnected)
+              ? `Playtest started, but ${body.disconnected.join(', ')} disconnected before answering an eval.`
+              : 'Playtest did not become ready before ready_timeout_s.',
+          roles: Array.isArray(body.roles) ? body.roles : undefined,
+        });
+      }, signal);
+    }
+
+    return this._withinResponseBudget('solo_playtest', action, [instance_id, timeout], async () => {
+      const body = this._parseTextResult(await this.stopPlaytest(instance_id, timeout));
+      if (body.success === true && body.runtimeStopped !== false) {
         return this._textResult({
           success: true,
           action,
-          message: 'Playtest started.',
-          roles: Array.isArray(body.roles) ? body.roles : undefined,
+          message: 'Playtest stopped.',
         });
       }
       return this._textResult({
-        // Keep lifecycle diagnostics on failures; only successful responses are brief.
         ...body,
         success: false,
         action,
-        error: body.error ?? 'start_failed',
-        message: body.success === true
-          ? 'Playtest did not become ready before timeout.'
-          : body.message ?? 'Playtest did not start.',
+        error: body.error ?? 'stop_failed',
+        message: body.message ?? 'Playtest did not stop.',
         roles: Array.isArray(body.roles) ? body.roles : undefined,
+        requiresBuiltInMcp: body.requiresBuiltInMcp === true ? true : undefined,
+        recoveryHint: typeof body.recoveryHint === 'string' ? body.recoveryHint : undefined,
       });
-    }
-
-    const body = this._parseTextResult(await this.stopPlaytest(instance_id, timeout));
-    if (body.success === true && body.runtimeStopped !== false) {
-      return this._textResult({
-        success: true,
-        action,
-        message: 'Playtest stopped.',
-      });
-    }
-    return this._textResult({
-      ...body,
-      success: false,
-      action,
-      error: body.error ?? 'stop_failed',
-      message: body.message ?? 'Playtest did not stop.',
-      roles: Array.isArray(body.roles) ? body.roles : undefined,
-      requiresBuiltInMcp: body.requiresBuiltInMcp === true ? true : undefined,
-      recoveryHint: typeof body.recoveryHint === 'string' ? body.recoveryHint : undefined,
     });
   }
 
-  async startPlaytest(mode: string, numPlayers?: number, instance_id?: string, timeout = 60) {
+  async startPlaytest(
+    mode: string,
+    numPlayers?: number,
+    instance_id?: string,
+    timeout = DEFAULT_PLAYTEST_READY_TIMEOUT_S,
+    signal?: AbortSignal,
+  ) {
     if (mode !== 'play' && mode !== 'run') {
       throw new Error('mode must be "play" or "run"');
     }
@@ -4481,19 +5125,42 @@ export class RobloxStudioTools {
       };
     }
     const response = await this._requestPeer('/api/start-playtest', data, resolved.targetPeerId);
-    let wait: { ok: boolean; roles: string[]; timedOut: boolean } | undefined;
+    let wait: { ok: boolean; roles: string[]; timedOut: boolean; studioError?: string } | undefined;
+    let readiness: RuntimeEvalReadiness | undefined;
     if (response?.success === true) {
       const requiredRoles = mode === 'play' ? ['server', 'client-1'] : ['server'];
-      wait = await this._waitForRuntimeRolesFresh(resolved.targetInstanceId, startedAt, requiredRoles, timeout);
+      // Older plugins do not return a testId; they keep the readiness-only wait.
+      const soloStart = typeof response.testId === 'string'
+        ? { editPeerId: resolved.targetPeerId, testId: response.testId }
+        : undefined;
+      wait = await this._waitForRuntimeRolesFresh(resolved.targetInstanceId, startedAt, requiredRoles, timeout, soloStart, signal);
+      if (wait.ok) readiness = await this._waitForRuntimeEval(resolved.targetInstanceId, startedAt + timeout * 1000, signal);
     }
-    const body = wait
+    const body = wait?.studioError !== undefined
       ? {
         ...response,
-        runtimeReady: wait.ok,
-        timedOut: wait.timedOut,
+        ...describePlaytestStartFailure(wait.studioError, 'playtest'),
+        success: false,
+        runtimeReady: false,
+        timedOut: false,
         roles: wait.roles,
+        elapsedMs: Date.now() - startedAt,
       }
-      : response;
+      : wait
+        ? {
+          ...response,
+          runtimeReady: wait.ok && readiness?.ready === true,
+          timedOut: wait.timedOut || (readiness?.ready === false && readiness.disconnected.length === 0),
+          // Peers can leave during the eval wait; report the scope as it is now.
+          roles: readiness ? this._rolesForScope(resolved.targetInstanceId) : wait.roles,
+          targets: readiness?.targets,
+          notReady: readiness?.ready === false ? readiness.notReady : undefined,
+          ...(readiness?.ready === false
+            ? runtimeEvalFailure(readiness, this._runtimeTargetsForScope(resolved.targetInstanceId).length > 0, 'stop')
+            : {}),
+          elapsedMs: Date.now() - startedAt,
+        }
+        : response;
     return {
       content: [
         {
@@ -4571,6 +5238,68 @@ export class RobloxStudioTools {
     };
   }
 
+  // The client Peers the server plugin still brokers, or undefined from a plugin
+  // that does not report them.
+  private _brokeredClients(serverState: unknown) {
+    if (serverState === null || typeof serverState !== 'object' || !('clients' in serverState)) return undefined;
+    const clients = serverState.clients;
+    if (!Array.isArray(clients)) return undefined;
+    return clients.flatMap((client: unknown) => {
+      if (client === null || typeof client !== 'object' || !('peerId' in client) || typeof client.peerId !== 'string') return [];
+      return [{
+        peerId: client.peerId,
+        role: 'role' in client && typeof client.role === 'string' ? client.role : undefined,
+        playerPresent: !('playerPresent' in client) || client.playerPresent !== false,
+        heartbeatAgeMs: 'heartbeatAgeMs' in client && typeof client.heartbeatAgeMs === 'number' ? client.heartbeatAgeMs : undefined,
+      }];
+    });
+  }
+
+  // The server stops brokering a client as soon as its Player leaves, but the
+  // proxy's disconnect notice can lag or be lost, and the Peer would then linger
+  // until expiry. Drop such clients now. A client that registered after the state
+  // request began can be missing from that snapshot while it joins, so only
+  // clients connected before it count.
+  private async _pruneDepartedClients(
+    instanceId: string,
+    serverState: StudioToolResponse | undefined,
+    requestedAt: number,
+  ): Promise<string[]> {
+    const clients = this._brokeredClients(serverState);
+    const server = this._peerForRoleInScope(instanceId, 'server');
+    if (!clients || !server) return [];
+    const brokered = new Set(clients.filter((client) => client.playerPresent).map((client) => client.peerId));
+    const departed = this.bridge.getPeersInScope(instanceId).filter((peer) =>
+      isClientRole(peer.role) &&
+      peer.transportPeerId === server.transportPeerId &&
+      peer.instanceId !== server.instanceId &&
+      peer.connectedAt < requestedAt &&
+      !brokered.has(peer.peerId));
+    for (const peer of departed) await this.bridge.unregisterInstanceIdEverywhere(peer.instanceId);
+    return departed.map((peer) => peer.peerId);
+  }
+
+  // After a failed leave request, asks the server whether the client's Player is
+  // still there; if not, forgets the client so the role does not linger.
+  private async _clientAlreadyLeft(scopeInstanceId: string, clientPeerId: string): Promise<boolean> {
+    const refresh = this.bridge.refreshTopologyForRouting();
+    if (refresh) await refresh;
+    const peer = this.bridge.getPeersInScope(scopeInstanceId).find((candidate) => candidate.peerId === clientPeerId);
+    if (!peer) return true;
+    const server = this._peerForRoleInScope(scopeInstanceId, 'server');
+    if (!server || server.instanceId === peer.instanceId || server.transportPeerId !== peer.transportPeerId) return false;
+    let serverState: StudioToolResponse;
+    try {
+      serverState = await this._requestPeer('/api/multiplayer-test-state', {}, server.peerId, 5000);
+    } catch {
+      return false;
+    }
+    const clients = this._brokeredClients(serverState);
+    if (!clients || clients.some((entry) => entry.peerId === clientPeerId && entry.playerPresent)) return false;
+    await this.bridge.unregisterInstanceIdEverywhere(peer.instanceId);
+    return true;
+  }
+
   private async _buildMultiplayerState(instanceId: string): Promise<Record<string, unknown>> {
     const refresh = this.bridge.refreshTopologyForRouting();
     if (refresh) await refresh;
@@ -4604,11 +5333,18 @@ export class RobloxStudioTools {
     }
 
     if (server) {
+      const requestedAt = Date.now();
       try {
         serverState = await this._request('/api/multiplayer-test-state', {}, instanceId, 'server');
         body.server = serverState;
       } catch (err) {
         body.server = { error: err instanceof Error ? err.message : String(err) };
+      }
+      const departed = await this._pruneDepartedClients(instanceId, serverState, requestedAt);
+      if (departed.length > 0) {
+        const remaining = peers.filter((peer) => !departed.includes(peer.peerId));
+        body.peers = remaining;
+        body.peerCount = remaining.length;
       }
     }
 
@@ -4646,6 +5382,99 @@ export class RobloxStudioTools {
     return false;
   }
 
+  // The edit Studio behind a scope, as the instance manager identifies its process.
+  private _editInstanceForScope(instanceId: string) {
+    return this.bridge.getPeersInScope(instanceId).find((peer) => peer.role === 'edit');
+  }
+
+  private async _listTestWindows(instanceId: string): Promise<PlaytestProcessListing> {
+    const edit = this._editInstanceForScope(instanceId);
+    if (!edit) return { status: 'unavailable', reason: 'The edit Studio is not connected.' };
+    return this.instanceManager.listPlaytestProcesses(edit);
+  }
+
+  /**
+   * Closes every test window (Server and clients) of the edit Studio behind
+   * `instanceId`, whether or not its plugin ever connected. Windows still get
+   * `graceMs` to exit on their own first, as they do after EndTest.
+   */
+  private async _closeTestWindows(instanceId: string, graceMs: number): Promise<TestWindowCleanup> {
+    let listing = await this._listTestWindows(instanceId);
+    if (listing.status === 'unavailable') return { tracked: false, reason: listing.reason };
+    if (listing.status === 'error') return { tracked: true, found: 0, closed: 0, remaining: 0, listingFailed: true, error: listing.error };
+    const found = listing.processes.length;
+    const graceDeadline = Date.now() + graceMs;
+    while (listing.status === 'ok' && listing.processes.length > 0 && Date.now() < graceDeadline) {
+      await sleep(Math.min(500, Math.max(1, graceDeadline - Date.now())));
+      listing = await this._listTestWindows(instanceId);
+    }
+    if (listing.status === 'unavailable') return { tracked: false, reason: listing.reason };
+    if (listing.status === 'error') return { tracked: true, found, closed: 0, remaining: 0, listingFailed: true, error: listing.error };
+    if (listing.processes.length === 0) return { tracked: true, found, closed: 0, remaining: 0 };
+    const result = await this.instanceManager.closePlaytestProcesses(listing.processes);
+    return {
+      tracked: true,
+      found,
+      closed: result.closed.length,
+      remaining: result.remaining.length,
+      ...(result.error ? { error: result.error } : {}),
+    };
+  }
+
+  // The edit plugin's multiplayer session; empty when it cannot answer.
+  private async _multiplayerEditSession(instanceId: string): Promise<{ phase?: string; testId?: string }> {
+    if (!this._rolesForScope(instanceId).includes('edit')) return {};
+    try {
+      const editState = await this._request('/api/multiplayer-test-state', {}, instanceId, 'edit', 2000);
+      const session = editState?.session;
+      return {
+        phase: typeof session?.phase === 'string' ? session.phase : undefined,
+        testId: typeof session?.testId === 'string' ? session.testId : undefined,
+      };
+    } catch {
+      return {};
+    }
+  }
+
+  /**
+   * Closes the test windows of a playtest whose plugins are gone, and confirms
+   * the teardown only when none remain and Studio no longer reports that test
+   * starting or running. Studio can open the windows seconds after its start
+   * call, so while it still reports the test running this keeps closing new
+   * ones until `timeoutSec`. Studio runs one test at a time: once it reports a
+   * different test (`testId`, by default the one running at the first check),
+   * that test's windows are someone else's and are left alone.
+   * Without process tracking, only the phase counts.
+   */
+  private async _endTestWindows(
+    instanceId: string,
+    timeoutSec: number,
+    graceMs: number,
+    ownTestId?: string,
+  ): Promise<{ cleanup: TestWindowCleanup; confirmed: boolean; editPhase?: string }> {
+    const deadline = Date.now() + timeoutSec * 1000;
+    let found = 0;
+    let closed = 0;
+    let grace = graceMs;
+    let session = await this._multiplayerEditSession(instanceId);
+    const testId = ownTestId ?? session.testId;
+    const anotherTest = () => isActiveMultiplayerPhase(session.phase) && testId !== undefined && session.testId !== testId;
+    if (anotherTest()) return { cleanup: { tracked: true, found, closed, remaining: 0 }, confirmed: true, editPhase: session.phase };
+    for (;;) {
+      const cleanup = await this._closeTestWindows(instanceId, grace);
+      grace = 0;
+      session = await this._multiplayerEditSession(instanceId);
+      const over = !isActiveMultiplayerPhase(session.phase) || anotherTest();
+      if (!cleanup.tracked) return { cleanup, confirmed: over, editPhase: session.phase };
+      found += cleanup.found;
+      closed += cleanup.closed;
+      const total: TestWindowCleanup = { ...cleanup, found, closed };
+      if (cleanup.listingFailed || cleanup.remaining > 0) return { cleanup: total, confirmed: false, editPhase: session.phase };
+      if (over || Date.now() >= deadline) return { cleanup: total, confirmed: over, editPhase: session.phase };
+      await sleep(Math.min(1000, Math.max(1, deadline - Date.now())));
+    }
+  }
+
   private async _isMultiplayerTestRunning(instanceId: string): Promise<boolean> {
     const refresh = this.bridge.refreshTopologyForRouting();
     if (refresh) await refresh;
@@ -4659,7 +5488,8 @@ export class RobloxStudioTools {
     clientCount: number,
     timeoutSec = 30,
     connectedAfter?: number,
-  ): Promise<{ ok: boolean; roles: string[]; timedOut: boolean; phase?: string; error?: unknown }> {
+    signal?: AbortSignal,
+  ): Promise<MultiplayerStartWait> {
     const deadline = Date.now() + timeoutSec * 1000;
     let lastPhase: string | undefined;
     while (Date.now() < deadline) {
@@ -4670,7 +5500,7 @@ export class RobloxStudioTools {
           const freshRoles = new Set(peers.filter((peer) => peer.connectedAt >= connectedAfter).map((peer) => peer.role));
           const freshClientCount = [...freshRoles].filter((role) => /^client-\d+$/.test(role)).length;
           if (!freshRoles.has('server') || freshClientCount !== clientCount) {
-            await sleep(250);
+            await sleep(250, signal);
             continue;
           }
         }
@@ -4678,7 +5508,7 @@ export class RobloxStudioTools {
       }
       try {
         const remainingMs = Math.max(1, Math.min(1000, deadline - Date.now()));
-        const editState = await this._request('/api/multiplayer-test-state', {}, instanceId, 'edit', remainingMs);
+        const editState = await this._request('/api/multiplayer-test-state', {}, instanceId, 'edit', remainingMs, signal);
         const session = editState?.session;
         if (typeof session?.phase === 'string') {
           lastPhase = session.phase;
@@ -4689,7 +5519,7 @@ export class RobloxStudioTools {
       } catch {
         // Keep waiting; normal startup is driven by runtime peers registering.
       }
-      await sleep(250);
+      await sleep(250, signal);
     }
     return { ok: false, roles: this._rolesForScope(instanceId), timedOut: true, phase: lastPhase };
   }
@@ -4702,6 +5532,8 @@ export class RobloxStudioTools {
     value?: unknown,
     timeout?: number,
     instance_id?: string,
+    ready_timeout_s?: number,
+    signal?: AbortSignal,
   ) {
     if (
       action !== 'start' &&
@@ -4716,19 +5548,41 @@ export class RobloxStudioTools {
     const briefState = async (instanceId?: string) => {
       const refresh = this.bridge.refreshTopologyForRouting();
       if (refresh) await refresh;
-      const state = await this._buildMultiplayerState(this._resolveInstanceIdOnly(instanceId));
+      const scopeInstanceId = this._resolveInstanceIdOnly(instanceId);
+      const state = await this._buildMultiplayerState(scopeInstanceId);
       const roles = Array.isArray(state.peers)
         ? state.peers.flatMap((peer) =>
             peer !== null && typeof peer === 'object' && 'role' in peer && typeof peer.role === 'string'
               ? [peer.role]
               : [])
         : [];
+      // The server reports each client's bridge heartbeat age; a silent bridge
+      // usually means the client's Studio process is gone, while its Player
+      // stays on the server until the engine's connection timeout.
+      const unresponsiveClients = (this._brokeredClients(state.server) ?? []).flatMap((client) =>
+        client.playerPresent && client.role !== undefined && roles.includes(client.role) &&
+        (client.heartbeatAgeMs ?? 0) > CLIENT_BRIDGE_STALE_MS
+          ? [client.role]
+          : []);
+      // Windows by process: one whose plugin is loading, or never connected, has no role.
+      const testWindows = await this._listTestWindows(scopeInstanceId);
+      const windowCount = testWindows.status === 'ok' ? testWindows.processes.length : 0;
+      const unanswered = windowCount - roles.filter((role) => role === 'server' || /^client-\d+$/.test(role)).length;
       return {
         phase: state.phase,
         multiplayerGroupId: typeof state.multiplayerGroupId === 'string' ? state.multiplayerGroupId : undefined,
         roles,
         playerCount: typeof state.playerCount === 'number' ? state.playerCount : undefined,
         error: typeof state.error === 'string' ? state.error : undefined,
+        ...(unresponsiveClients.length > 0 ? {
+          unresponsiveClients,
+          hint: 'These clients\' MCP bridges sent no heartbeat for over 10 s: their Studio process may have exited or be frozen. leave_client removes them.',
+        } : {}),
+        ...(windowCount > 0 ? { testWindows: windowCount } : {}),
+        ...(unanswered > 0 ? {
+          unansweredTestWindows: unanswered,
+          testWindowHint: 'Test windows are running without a connected MCP plugin (still loading, or never connected). end closes them.',
+        } : {}),
       };
     };
 
@@ -4740,8 +5594,27 @@ export class RobloxStudioTools {
       });
     }
 
+    return this._withinResponseBudget(
+      'multiplayer_playtest', action, [instance_id, numPlayers, target, testArgs, value, timeout, ready_timeout_s],
+      (jobSignal) => this._multiplayerPlaytestAction(action, numPlayers, target, testArgs, value, timeout, instance_id, ready_timeout_s, jobSignal),
+      signal,
+    );
+  }
+
+  // start, add_players, leave_client and end, run under the response budget.
+  private async _multiplayerPlaytestAction(
+    action: string,
+    numPlayers: number | undefined,
+    target: string | undefined,
+    testArgs: unknown,
+    value: unknown,
+    timeout: number | undefined,
+    instance_id: string | undefined,
+    ready_timeout_s: number | undefined,
+    signal: AbortSignal | undefined,
+  ): Promise<ToolCallResult> {
     if (action === 'start') {
-      const body = this._parseTextResult(await this.multiplayerTestStart(numPlayers as number, testArgs, timeout, instance_id));
+      const body = this._parseTextResult(await this.multiplayerTestStart(numPlayers as number, testArgs, ready_timeout_s ?? timeout, instance_id, signal));
       const stateValue = body.state;
       const state: Record<string, unknown> = stateValue !== null && typeof stateValue === 'object' && !Array.isArray(stateValue)
         ? { ...stateValue }
@@ -4759,10 +5632,12 @@ export class RobloxStudioTools {
       return this._textResult(launched ? {
         success: true,
         action,
-        message: 'Multiplayer playtest started.',
+        message: 'Multiplayer playtest started; every runtime peer answered an eval.',
         multiplayerGroupId,
         roles: Array.isArray(body.roles) ? body.roles : undefined,
+        targets: body.targets,
         playerCount: typeof state.playerCount === 'number' ? state.playerCount : undefined,
+        elapsedMs: body.elapsedMs,
       } : {
         success: false,
         action,
@@ -4772,6 +5647,18 @@ export class RobloxStudioTools {
           : body.message ?? 'Multiplayer playtest did not start.',
         multiplayerGroupId,
         roles: Array.isArray(body.roles) ? body.roles : undefined,
+        notReady: body.notReady,
+        running: typeof body.running === 'boolean' ? body.running : undefined,
+        elapsedMs: body.elapsedMs,
+        studioError: typeof body.studioError === 'string' ? body.studioError : undefined,
+        recoveryHint: typeof body.recoveryHint === 'string' ? body.recoveryHint : undefined,
+        teardownConfirmed: typeof body.teardownConfirmed === 'boolean' ? body.teardownConfirmed : undefined,
+        closedTestWindows: typeof body.closedTestWindows === 'number' ? body.closedTestWindows : undefined,
+        remainingTestWindows: typeof body.remainingTestWindows === 'number' ? body.remainingTestWindows : undefined,
+        testWindowError: typeof body.testWindowError === 'string' ? body.testWindowError : undefined,
+        teardownError: typeof body.teardownError === 'string' ? body.teardownError : undefined,
+        testWindows: typeof body.testWindows === 'number' ? body.testWindows : undefined,
+        editPhase: typeof body.editPhase === 'string' ? body.editPhase : undefined,
       });
     }
 
@@ -4804,7 +5691,9 @@ export class RobloxStudioTools {
       return this._textResult(body.success === true && body.left === true ? {
         success: true,
         action,
-        message: 'Client left.',
+        message: typeof body.message === 'string' && (body.alreadyLeft === true || body.removedByServer === true)
+          ? body.message
+          : 'Client left.',
         roles: Array.isArray(body.roles) ? body.roles : undefined,
       } : {
         success: false,
@@ -4819,16 +5708,30 @@ export class RobloxStudioTools {
     const multiplayerGroupId = typeof body.multiplayerGroupId === 'string'
       ? body.multiplayerGroupId
       : undefined;
+    const closedTestWindows = typeof body.closedTestWindows === 'number' ? body.closedTestWindows : undefined;
+    const remainingTestWindows = typeof body.remainingTestWindows === 'number' ? body.remainingTestWindows : undefined;
+    const editPhase = typeof body.editPhase === 'string' ? body.editPhase : undefined;
     return this._textResult(body.success === true && body.ended === true ? {
       success: true,
       action,
       multiplayerGroupId,
       message: body.alreadyEnded === true
         ? 'Multiplayer playtest already ended.'
-        : (body.teardownConfirmed === false
-          ? 'Multiplayer playtest end requested; teardown still in progress. Use multiplayer_playtest action="status" to confirm.'
-          : 'Multiplayer playtest ended.'),
+        : remainingTestWindows !== undefined
+          ? `Multiplayer playtest end requested, but ${remainingTestWindows} test window(s) are still running.`
+          : body.teardownConfirmed === false
+            ? (editPhase === 'starting' || editPhase === 'running'
+              ? 'Studio still reports a multiplayer test in progress, but no server or client plugin answered; its windows may still be opening. Call end again, or close its Server and client windows in Studio.'
+              : 'Multiplayer playtest end requested; teardown still in progress. Use multiplayer_playtest action="status" to confirm.')
+            : closedTestWindows !== undefined
+              ? `Multiplayer playtest ended; closed ${closedTestWindows} test window(s) that were still running.`
+              : 'Multiplayer playtest ended.',
       teardownConfirmed: body.teardownConfirmed === true,
+      closedTestWindows,
+      remainingTestWindows,
+      testWindowError: typeof body.testWindowError === 'string' ? body.testWindowError : undefined,
+      editPhase: body.teardownConfirmed === false ? editPhase : undefined,
+      testWindowTracking: typeof body.testWindowTracking === 'string' ? body.testWindowTracking : undefined,
     } : {
       success: false,
       action,
@@ -4840,7 +5743,7 @@ export class RobloxStudioTools {
     });
   }
 
-  async multiplayerTestStart(numPlayers: number, testArgs?: unknown, timeout?: number, instance_id?: string) {
+  async multiplayerTestStart(numPlayers: number, testArgs?: unknown, timeout?: number, instance_id?: string, signal?: AbortSignal) {
     if (!Number.isInteger(numPlayers) || numPlayers < 1 || numPlayers > 8) {
       throw new Error('numPlayers must be an integer from 1 to 8');
     }
@@ -4861,6 +5764,24 @@ export class RobloxStudioTools {
       });
     }
 
+    // Test windows with no connected plugin: left by an earlier start, opened
+    // outside MCP, or another caller's start still loading. Studio runs one
+    // test at a time, so say so rather than close windows that may not be ours.
+    const staleListing = await this._listTestWindows(editTarget.instanceId);
+    if (staleListing.status === 'ok' && staleListing.processes.length > 0) {
+      const { phase } = await this._multiplayerEditSession(editTarget.instanceId);
+      return this._textResult({
+        success: false,
+        error: 'stale_test_windows',
+        message: isActiveMultiplayerPhase(phase)
+          ? `Studio is still starting a multiplayer test: ${staleListing.processes.length} test window(s) are open and no plugin has connected yet. Wait for it, or end it with multiplayer_playtest action="end".`
+          : `${staleListing.processes.length} test window(s) of this Studio are running without a connected MCP plugin. Close them with multiplayer_playtest action="end", then start again.`,
+        testWindows: staleListing.processes.length,
+        editPhase: phase,
+        roles: this._rolesForScope(editTarget.instanceId),
+      });
+    }
+
     const startedAt = Date.now();
     const response = await this._requestPeer(
       '/api/multiplayer-test-start',
@@ -4877,13 +5798,39 @@ export class RobloxStudioTools {
     }
 
     await this.bridge.createMultiplayerGroupEverywhere(groupId, editTarget.instanceId);
-    const wait = await this._waitForMultiplayerStart(editTarget.instanceId, numPlayers, timeout ?? 60, startedAt);
+    const readyTimeoutS = timeout ?? DEFAULT_PLAYTEST_READY_TIMEOUT_S;
+    let wait: MultiplayerStartWait;
+    let readiness: RuntimeEvalReadiness | undefined;
+    try {
+      wait = await this._waitForMultiplayerStart(editTarget.instanceId, numPlayers, readyTimeoutS, startedAt, signal);
+      readiness = wait.ok
+        ? await this._waitForRuntimeEval(editTarget.instanceId, startedAt + readyTimeoutS * 1000, signal)
+        : undefined;
+    } catch (error) {
+      // A cancelled start leaves nobody to end the playtest it began.
+      await this._teardownFailedStart(editTarget.instanceId, groupId);
+      throw error;
+    }
     const launched = wait.ok;
+    // Peers that never all registered leave a playtest nobody is told is
+    // running; end it and close its windows, including ones still opening.
+    // A start Studio refused opened no window: any open ones are another test's.
+    const startTeardown = wait.ok || wait.phase === 'failed'
+      ? undefined
+      : await this._teardownFailedStart(editTarget.instanceId, groupId);
     const state = await this._buildMultiplayerState(editTarget.instanceId);
-    const success = wait.ok;
+    const success = wait.ok && readiness?.ready === true;
     const runtimeStillConnected = this._runtimeTargetsForScope(editTarget.instanceId).length > 0;
     const definitelyFailed = state.phase === 'failed' && !runtimeStillConnected;
     if (definitelyFailed) await this.bridge.removeMultiplayerGroupEverywhere(groupId);
+    // Studio refused the start (its async call failed); keep its error rather than blame peer detection.
+    const startFailure = !success && wait.phase === 'failed'
+      ? describePlaytestStartFailure(
+        typeof wait.error === 'string' ? wait.error : String(wait.error ?? 'unknown error'),
+        'multiplayer playtest',
+      )
+      : undefined;
+    const evalFailure = readiness?.ready === false ? runtimeEvalFailure(readiness, runtimeStillConnected, 'end') : undefined;
     return {
       content: [{
         type: 'text',
@@ -4891,20 +5838,72 @@ export class RobloxStudioTools {
           ...response,
           multiplayerGroupId: groupId,
           success,
-          ready: wait.ok,
+          ready: success,
           launched,
           startRequested: true,
-          timedOut: wait.timedOut,
+          timedOut: wait.timedOut || (readiness?.ready === false && readiness.disconnected.length === 0),
           wait,
-          roles: wait.roles,
+          // Peers can leave during the eval wait; report the scope as it is now.
+          roles: readiness ? this._rolesForScope(editTarget.instanceId) : wait.roles,
+          targets: readiness?.targets,
+          notReady: readiness?.ready === false ? readiness.notReady : undefined,
+          running: evalFailure?.running,
+          disconnected: evalFailure?.disconnected,
           state,
-          error: success ? undefined : wait.error ?? 'multiplayer_start_not_detected',
+          error: success
+            ? undefined
+            : startFailure?.error ?? (readiness?.ready === false ? 'runtime_eval_not_ready' : wait.error ?? 'multiplayer_start_not_detected'),
           message: success
-            ? 'Multiplayer Studio test started and runtime peers detected.'
-            : 'Multiplayer Studio test start was requested, but MCP did not detect the required server/client peers before timeout.',
+            ? 'Multiplayer Studio test started and every runtime peer answered an eval.'
+            : startFailure?.message ?? (evalFailure?.disconnected
+              ? `Multiplayer Studio test started, but ${evalFailure.disconnected.join(', ')} disconnected before answering an eval.`
+              : evalFailure
+                ? 'Multiplayer Studio test started, but some runtime peers did not answer an eval before ready_timeout_s.'
+                : 'Multiplayer Studio test start was requested, but MCP did not detect the required server/client peers before timeout.')
+              + (startTeardown === undefined || startFailure !== undefined
+                ? ''
+                : startTeardown.teardownConfirmed === true
+                  ? typeof startTeardown.closedTestWindows === 'number'
+                    ? ` MCP ended the attempt and closed its ${startTeardown.closedTestWindows} test window(s).`
+                    : ' MCP ended the attempt.'
+                  : ' MCP could not confirm that the attempt\'s test windows closed; call multiplayer_playtest action="end".'),
+          studioError: startFailure?.studioError,
+          recoveryHint: startFailure?.recoveryHint ?? evalFailure?.recoveryHint,
+          ...startTeardown,
+          elapsedMs: Date.now() - startedAt,
           startedAt,
         }),
       }],
+    };
+  }
+
+  // Ends a start that failed or was cancelled: through the server plugin when
+  // one connected, and by closing the test's windows either way.
+  private async _teardownFailedStart(instanceId: string, testId: string): Promise<Record<string, unknown>> {
+    let ended: Record<string, unknown>;
+    try {
+      ended = this._parseTextResult(await this.multiplayerTestEnd('start_failed', 30, instanceId));
+    } catch (error) {
+      // For example clients connected without a server: no plugin can end the test.
+      ended = { error: error instanceof Error ? error.message : String(error) };
+    }
+    const closedByEnd = typeof ended.closedTestWindows === 'number' ? ended.closedTestWindows : 0;
+    if (ended.teardownConfirmed === true) {
+      return { teardownConfirmed: true, ...(closedByEnd > 0 ? { closedTestWindows: closedByEnd } : {}) };
+    }
+    // The server refused EndTest, or no plugin could be asked: close the windows directly.
+    const teardown = await this._endTestWindows(instanceId, 30, 0, testId);
+    const { cleanup } = teardown;
+    const closed = closedByEnd + (cleanup.tracked ? cleanup.closed : 0);
+    const runtimeLeft = this._runtimeTargetsForScope(instanceId).length > 0;
+    return {
+      teardownConfirmed: cleanup.tracked && teardown.confirmed && !runtimeLeft,
+      ...(closed > 0 ? { closedTestWindows: closed } : {}),
+      ...(cleanup.tracked && cleanup.remaining > 0 ? { remainingTestWindows: cleanup.remaining } : {}),
+      ...(cleanup.tracked && cleanup.error !== undefined ? { testWindowError: cleanup.error } : {}),
+      teardownError: typeof ended.error === 'string'
+        ? ended.error
+        : cleanup.tracked ? undefined : `Test windows cannot be closed here: ${cleanup.reason}`,
     };
   }
 
@@ -4969,12 +5968,33 @@ export class RobloxStudioTools {
       candidate.instanceIds.includes(clientTarget.instanceId)
     );
     const scopeInstanceId = group?.controllerInstanceId ?? clientTarget.instanceId;
-    const response = await this._requestPeer(
-      '/api/multiplayer-test-leave-client',
-      {},
-      clientTarget.targetPeerId,
-    );
-    if (response?.error) {
+    let response: StudioToolResponse | undefined;
+    let requestFailed = false;
+    let requestError: unknown;
+    try {
+      response = await this._requestPeer(
+        '/api/multiplayer-test-leave-client',
+        {},
+        clientTarget.targetPeerId,
+      );
+    } catch (error) {
+      // The client's proxy can disconnect while the request is pending.
+      requestFailed = true;
+      requestError = error;
+    }
+    if (requestFailed || response?.error) {
+      // A client whose Player already left cannot answer; that is not a failure to leave.
+      if (await this._clientAlreadyLeft(scopeInstanceId, clientTarget.targetPeerId)) {
+        return this._textResult({
+          success: true,
+          left: true,
+          alreadyLeft: true,
+          message: `${clientTarget.role} had already left (its Player is no longer in the server); removed it.`,
+          roles: this._rolesForScope(scopeInstanceId),
+          state: await this._buildMultiplayerState(scopeInstanceId),
+        });
+      }
+      if (requestFailed) throw requestError;
       return { content: [{ type: 'text', text: JSON.stringify(response) }] };
     }
     const wait = await this._waitForRuntimeRoles(
@@ -5013,14 +6033,26 @@ export class RobloxStudioTools {
         (role) => role === 'server' || /^client-\d+$/.test(role),
       );
       if (!hasRuntime) {
-        if (group) await this.bridge.removeMultiplayerGroupEverywhere(group.id);
+        // No plugin to ask, but a test window whose plugin is still loading, or
+        // never connected, keeps running until its process is closed.
+        const teardown = await this._endTestWindows(instanceId, timeout ?? 30, 0, group?.id);
+        const { cleanup } = teardown;
+        const found = cleanup.tracked ? cleanup.found : 0;
+        if (group && teardown.confirmed) await this.bridge.removeMultiplayerGroupEverywhere(group.id);
         return this._textResult({
           success: true,
           multiplayerGroupId: group?.id,
           ended: true,
-          alreadyEnded: true,
-          teardownConfirmed: true,
-          message: 'No active multiplayer test to end (already ended).',
+          alreadyEnded: found === 0 && teardown.confirmed,
+          teardownConfirmed: teardown.confirmed,
+          ...testWindowFields(cleanup),
+          ...(teardown.confirmed ? {} : {
+            editPhase: teardown.editPhase,
+            ...(cleanup.tracked ? {} : { testWindowTracking: cleanup.reason }),
+          }),
+          message: found === 0 && teardown.confirmed
+            ? 'No active multiplayer test to end (already ended).'
+            : undefined,
         });
       }
       throw error;
@@ -5042,32 +6074,61 @@ export class RobloxStudioTools {
       });
     }
     const editDone = await this._waitForMultiplayerEditDone(scopeInstanceId, timeout ?? 30);
-    const wait = await this._waitForRuntimeRoles(
+    let wait = await this._waitForRuntimeRoles(
       scopeInstanceId,
       { noRuntime: true },
       timeout ?? 30,
     );
+    // Plugins disconnecting is not the windows exiting: close any test window
+    // still running, including one whose plugin never connected.
+    let teardown = await this._endTestWindows(
+      scopeInstanceId, wait.ok ? 10 : 0, wait.ok ? TEST_WINDOW_EXIT_GRACE_MS : 0, group?.id,
+    );
+    if (!wait.ok && teardown.cleanup.tracked && teardown.cleanup.closed > 0) {
+      // Closing the windows drops their plugins; then Studio ends the test.
+      wait = await this._waitForRuntimeRoles(scopeInstanceId, { noRuntime: true }, 10);
+      if (wait.ok) {
+        const settled = await this._endTestWindows(scopeInstanceId, 10, 0, group?.id);
+        const before = teardown.cleanup;
+        teardown = settled.cleanup.tracked
+          ? { ...settled, cleanup: { ...settled.cleanup, found: before.found + settled.cleanup.found, closed: before.closed + settled.cleanup.closed } }
+          : settled;
+      }
+    }
+    const teardownConfirmed = wait.ok && teardown.confirmed;
     const state = await this._buildMultiplayerState(scopeInstanceId);
     const result = this._textResult({
       ...response,
       multiplayerGroupId: group?.id,
       ended: response.success === true,
-      teardownConfirmed: wait.ok,
+      teardownConfirmed,
       editDone,
       timedOut: wait.timedOut,
       roles: wait.roles,
+      ...testWindowFields(teardown.cleanup),
       state,
     });
-    if (wait.ok && group) await this.bridge.removeMultiplayerGroupEverywhere(group.id);
+    if (teardownConfirmed && group) await this.bridge.removeMultiplayerGroupEverywhere(group.id);
     return result;
   }
 
   async getConnectedInstances() {
     const refresh = this.bridge.refreshTopologyForRouting();
     if (refresh) await refresh;
+    const rejectedInstances = this.bridge.getVersionRejections().map((rejection) => ({
+      instanceId: rejection.instanceId,
+      role: rejection.role,
+      placeName: rejection.placeName,
+      pluginVersion: rejection.pluginVersion,
+      pluginVariant: rejection.pluginVariant,
+      serverVersion: rejection.serverVersion,
+      rejectedAt: new Date(rejection.rejectedAt).toISOString(),
+      hint: rejection.hint,
+    }));
     return this._textResult({
       instances: this.bridge.getConnectedInstances(),
       multiplayerGroups: this.bridge.getConnectedMultiplayerGroups(),
+      ...(rejectedInstances.length > 0 ? { rejectedInstances } : {}),
     });
   }
 
@@ -5078,31 +6139,66 @@ export class RobloxStudioTools {
     if (wait_ms !== undefined && (!Number.isInteger(wait_ms) || wait_ms < 0 || wait_ms > MAX_OPERATION_WAIT_MS)) {
       throw new Error(`wait_ms must be an integer from 0 to ${MAX_OPERATION_WAIT_MS}`);
     }
-    const deadline = Date.now() + (wait_ms ?? 0);
+    // One status call must also answer inside the client's timeout, so a longer
+    // wait_ms is cut to the response budget; waitCappedMs reports the wait used.
+    const waitMs = Math.min(wait_ms ?? 0, responseBudgetMs());
+    const capped = wait_ms !== undefined && wait_ms > waitMs ? { waitCappedMs: waitMs } : {};
+    const job = this.toolJobs.get(request_id);
+    if (job) {
+      const outcome = await this._awaitToolJob(job, waitMs, signal);
+      if (!outcome) return this._textResult({ ...this._toolJobPending(job), ...capped });
+      const status = {
+        requestId: job.id,
+        state: 'settled',
+        tool: job.tool,
+        action: job.action,
+        elapsedMs: (job.settledAt ?? Date.now()) - job.startedAt,
+      };
+      // One JSON item with the result nested: MCP clients read success, error and
+      // structuredContent from the first JSON text item, so a collected result
+      // must flag a failure the same way the direct call would have.
+      if ('error' in outcome) {
+        return { content: [{ type: 'text', text: JSON.stringify({ ...publicToolErrorBody(job.tool, outcome.error), ...status, outcome: 'error' }) }], isError: true };
+      }
+      const text = outcome.result.content.find((item) => item.type === 'text')?.text;
+      let result: unknown = text;
+      try {
+        if (text !== undefined) result = JSON.parse(text);
+      } catch {
+        // Not JSON: return the text as it is.
+      }
+      const inner = result && typeof result === 'object' && !Array.isArray(result) ? result as Record<string, unknown> : {};
+      const failed = inner.success === false || (typeof inner.error === 'string' && inner.error.length > 0);
+      return {
+        content: [{ type: 'text', text: JSON.stringify({ ...status, outcome: 'result', result }) }],
+        ...(failed ? { isError: true } : {}),
+      };
+    }
+    const deadline = Date.now() + waitMs;
     // A generate_model job may still be preparing its reference image here,
     // before the bridge holds any record of it.
     if (this.referenceUploads.view(request_id)) {
-      await this.referenceUploads.waitForPreparation(request_id, wait_ms ?? 0, signal);
+      await this.referenceUploads.waitForPreparation(request_id, waitMs, signal);
       const preparation = this.referenceUploads.view(request_id);
       if (preparation && preparation.stage !== 'dispatched') {
-        return this._textResult(this._preparationStatus(request_id, preparation));
+        return this._textResult({ ...this._preparationStatus(request_id, preparation), ...capped });
       }
     }
     const remainingMs = Math.max(0, deadline - Date.now());
-    return this._operationStatusResult(request_id, await this.bridge.getRequestStatusEverywhere(request_id, remainingMs, signal));
+    return this._operationStatusResult(request_id, await this.bridge.getRequestStatusEverywhere(request_id, remainingMs, signal), capped);
   }
 
-  private _requestStatusResult(requestId: string, status: RequestStatus | undefined) {
-    return this._textResult(status ? { ...status } : unretainedStatus(requestId));
+  private _requestStatusResult(requestId: string, status: RequestStatus | undefined, extra: Record<string, unknown> = {}) {
+    return this._textResult(status ? { ...status, ...extra } : { ...unretainedStatus(requestId), ...extra });
   }
 
   // A bridge status, plus the reference-image preparation and an overall phase
   // when this server prepared the operation for generate_model.
-  private _operationStatusResult(requestId: string, status: RequestStatus | undefined) {
+  private _operationStatusResult(requestId: string, status: RequestStatus | undefined, extra: Record<string, unknown> = {}) {
     const preparation = this.referenceUploads.view(requestId);
-    if (!preparation) return this._requestStatusResult(requestId, status);
-    if (!status) return this._textResult({ ...unretainedStatus(requestId), preparation });
-    return this._textResult({ ...status, phase: generationPhase(status), preparation });
+    if (!preparation) return this._requestStatusResult(requestId, status, extra);
+    if (!status) return this._textResult({ ...unretainedStatus(requestId), preparation, ...extra });
+    return this._textResult({ ...status, phase: generationPhase(status), preparation, ...extra });
   }
 
   // A generate_model job that has not reached the bridge, shaped like a request
@@ -5253,7 +6349,17 @@ export class RobloxStudioTools {
     try {
       return await this._generateModel(request, instance_id);
     } catch (error) {
-      if (error instanceof RoutingFailure) throw error;
+      // Structured failures keep their code and recovery fields (request ID,
+      // stage, outcome) for the shared error formatter; only plain validation
+      // errors are reported inline.
+      if (
+        error instanceof RoutingFailure
+        || error instanceof RequestFailure
+        || error instanceof StudioOperationError
+        || error instanceof OpenCloudOperationError
+        || error instanceof ReferenceUploadError
+        || error instanceof MultiplayerGroupInUseError
+      ) throw error;
       const message = error instanceof Error ? error.message : String(error);
       return {
         content: [{
@@ -5368,11 +6474,28 @@ export class RobloxStudioTools {
     if (!referencePng) return this._dispatchGenerateModel(payload, instance_id, timeoutMs, submit, operationId, undefined);
     const uploadUnavailable = this.referenceUploadUnavailable();
     if (uploadUnavailable) throw new Error(uploadUnavailable);
-    // Route before preparing anything: a request that cannot reach an edit
-    // Peer must not upload an image first.
-    const targetPeerId = await this._resolveSinglePeer('edit', instance_id);
+    // Pin the target before preparing anything: a request that cannot reach
+    // an edit Peer must not upload an image first, and the generation must
+    // reach this Studio even if another one connects during the upload. A
+    // retry that names no instance_id returns to its operation's Instance.
+    const pinnedInstanceId = operationId !== undefined ? this.referenceUploads.pinnedInstance(operationId) : undefined;
+    const { targetPeerId, targetInstanceId } = await this._resolveEditTarget(instance_id ?? pinnedInstanceId).catch((error: unknown) => {
+      // A retry that named no instance_id follows its operation; naming another
+      // connected Studio would only collide with that operation's record.
+      if (instance_id === undefined && pinnedInstanceId !== undefined && error instanceof RoutingFailure) {
+        throw new RoutingFailure({
+          ...error.routingError,
+          message: `Operation ${operationId} is tied to Studio instance ${pinnedInstanceId}, which is no longer connected; reconnect that Studio, or start over with a new operation_id.`,
+        });
+      }
+      throw error;
+    });
     if (submit && !this.bridge.supportsPrimaryFeature('submit')) {
-      throw new Error('The primary MCP server cannot start a job that outlives the call; call without async, or restart that server on this version. Nothing was uploaded.');
+      throw new RequestFailure(
+        'The primary MCP server cannot start a job that outlives the call; call without async, or restart that server on this version. Nothing was uploaded; queued; not_executed',
+        'primary_unsupported',
+        { requestId: operationId ?? randomUUID(), targetPeerId, stage: 'queued', outcome: 'not_executed', executionOutcome: 'not_executed' },
+      );
     }
 
     // Every upload mints a new asset ID, so a retry is identified by the
@@ -5380,19 +6503,19 @@ export class RobloxStudioTools {
     const png = referencePng;
     const identity = { ...payload, image: { kind: 'png_sha256', sha256: createHash('sha256').update(png).digest('hex') } };
     const attempt: ReferenceUploadAttempt = {
-      upload: (progress) => this.uploadGenerateModelReferenceImage(png, instance_id, progress),
-      resume: (checkpoint, progress) => this.resumeGenerateModelReferenceImage(checkpoint, instance_id, progress),
+      upload: (progress) => this.uploadGenerateModelReferenceImage(png, targetInstanceId, progress),
+      resume: (checkpoint, progress) => this.resumeGenerateModelReferenceImage(checkpoint, targetInstanceId, progress),
     };
     if (operationId === undefined && !submit) {
       // Nothing can retry a call without an operation ID, so nothing is shared.
       payload.image = { kind: 'asset', asset_id: await attempt.upload(UNTRACKED_UPLOAD) };
-      return this._dispatchGenerateModel(payload, instance_id, timeoutMs, false, undefined, identity);
+      return this._dispatchGenerateModel(payload, targetInstanceId, timeoutMs, false, undefined, identity);
     }
 
     // An async job without a caller ID still needs one before its upload starts.
     const jobId = operationId ?? randomUUID();
     const identityKey = createHash('sha256').update(JSON.stringify({ endpoint: '/api/generate-model', identity })).digest('hex');
-    const prepared = this.referenceUploads.lookup(jobId, identityKey, targetPeerId);
+    const prepared = this.referenceUploads.lookup(jobId, identityKey, targetPeerId, targetInstanceId);
     if (operationId !== undefined && !prepared) {
       // Another server's caller may already have started this operation on
       // the bridge; rejoin it instead of uploading the image again.
@@ -5402,15 +6525,20 @@ export class RobloxStudioTools {
     }
     let dispatchPeerId = targetPeerId;
     const generate = async () => {
-      payload.image = { kind: 'asset', asset_id: await this.referenceUploads.acquire(jobId, identityKey, targetPeerId, attempt) };
-      return this._dispatchGenerateModel(payload, instance_id, timeoutMs, submit, jobId, identity, (peerId) => {
+      payload.image = {
+        kind: 'asset',
+        asset_id: await this.referenceUploads.acquire(jobId, identityKey, targetPeerId, targetInstanceId, attempt),
+      };
+      // Dispatch resolves only within the pinned Instance: if it left, this
+      // fails as not admitted and the uploaded image is kept for a retry.
+      return this._dispatchGenerateModel(payload, targetInstanceId, timeoutMs, submit, jobId, identity, (peerId) => {
         dispatchPeerId = peerId;
         this.referenceUploads.dispatched(jobId, peerId);
       });
     };
     // Checked again in the same turn that starts the work: a concurrent caller
     // may have claimed this ID while the bridge was consulted.
-    const current = this.referenceUploads.lookup(jobId, identityKey, targetPeerId);
+    const current = this.referenceUploads.lookup(jobId, identityKey, targetPeerId, targetInstanceId);
     const job = generate();
     this.referenceUploads.attach(jobId, job);
     job.catch((error: unknown) => {
@@ -5424,8 +6552,11 @@ export class RobloxStudioTools {
     return job;
   }
 
-  private _resolveSinglePeer(target: string, instance_id: string | undefined): Promise<string> {
-    return this._withSinglePeer(target, instance_id, undefined, async (targetPeerId) => targetPeerId);
+  // The edit Peer for instance_id and the Studio Instance it belongs to. A
+  // multi-step operation pins the Instance, so a plugin reload in that Studio
+  // still reaches it, but a different Studio never does.
+  private _resolveEditTarget(instance_id: string | undefined): Promise<{ targetPeerId: string; targetInstanceId: string }> {
+    return this._withSinglePeer('edit', instance_id, undefined, async (targetPeerId, targetInstanceId) => ({ targetPeerId, targetInstanceId }));
   }
 
   private async _dispatchGenerateModel(
@@ -5701,7 +6832,7 @@ export class RobloxStudioTools {
     if (!this.openCloudClient.hasApiKey()) {
       return 'image_path and image_base64 require Roblox asset upload credentials because GenerateModelAsync only accepts rbxassetid:// or rbxasset:// image inputs. Set ROBLOX_OPEN_CLOUD_API_KEY plus ROBLOX_CREATOR_USER_ID or ROBLOX_CREATOR_GROUP_ID, or pass image_asset_id.';
     }
-    if (!process.env.ROBLOX_CREATOR_USER_ID && !process.env.ROBLOX_CREATOR_GROUP_ID) {
+    if (!resolveUploadCreator()) {
       return 'Creator identity required for image upload. Set ROBLOX_CREATOR_USER_ID or ROBLOX_CREATOR_GROUP_ID, or pass image_asset_id.';
     }
     return undefined;
@@ -5718,8 +6849,7 @@ export class RobloxStudioTools {
         fileName: 'generate-model-reference.png',
         displayName: STUDIO_ASSISTANT_SOURCE_IMAGE_LABEL,
         description: STUDIO_ASSISTANT_SOURCE_IMAGE_LABEL,
-        userId: process.env.ROBLOX_CREATOR_USER_ID,
-        groupId: process.env.ROBLOX_CREATOR_GROUP_ID,
+        ...resolveUploadCreator(),
         onSending: () => progress.sending(),
         onAccepted: (id) => progress.accepted({ provider: 'user_auth', id }),
       });
@@ -5728,15 +6858,8 @@ export class RobloxStudioTools {
 
     const unavailable = this.referenceUploadUnavailable();
     if (unavailable) throw new Error(unavailable);
-    const resolvedGroupId = process.env.ROBLOX_CREATOR_GROUP_ID;
-    const resolvedUserId = process.env.ROBLOX_CREATOR_USER_ID;
-
-    const creator: { userId?: string; groupId?: string } = {};
-    if (resolvedGroupId) {
-      creator.groupId = resolvedGroupId;
-    } else {
-      creator.userId = resolvedUserId;
-    }
+    // referenceUploadUnavailable already rejected a missing creator.
+    const creator = resolveUploadCreator() ?? {};
 
     const result = await this.openCloudClient.createAsset(
       {
@@ -5804,8 +6927,7 @@ export class RobloxStudioTools {
       }
     });
     const fileName = path.basename(filePath);
-    const resolvedGroupId = groupId || process.env.ROBLOX_CREATOR_GROUP_ID;
-    const resolvedUserId = userId || process.env.ROBLOX_CREATOR_USER_ID;
+    const resolvedCreator = resolveUploadCreator(userId, groupId);
 
     if (assetType === 'Decal' && this.cookieClient.hasCookie()) {
       const result = await this.cookieClient.uploadImage({
@@ -5813,8 +6935,7 @@ export class RobloxStudioTools {
         fileName,
         displayName,
         description: description || '',
-        userId: resolvedUserId,
-        groupId: resolvedGroupId,
+        ...resolvedCreator,
       });
       return {
         content: [{
@@ -5842,18 +6963,12 @@ export class RobloxStudioTools {
       );
     }
 
-    if (!resolvedUserId && !resolvedGroupId) {
+    if (!resolvedCreator) {
       throw new Error(
         'Creator identity required for Open Cloud upload. Set ROBLOX_CREATOR_USER_ID or ROBLOX_CREATOR_GROUP_ID, or pass userId/groupId as parameters.'
       );
     }
-
-    const creator: { userId?: string; groupId?: string } = {};
-    if (resolvedGroupId) {
-      creator.groupId = resolvedGroupId;
-    } else {
-      creator.userId = resolvedUserId;
-    }
+    const creator = resolvedCreator;
 
     const result = await this.openCloudClient.createAsset(
       {
@@ -6193,8 +7308,39 @@ export class RobloxStudioTools {
     maxBytes: number = MAX_INLINE_IMAGE_BYTES,
     downscale = 1,
   ): Promise<EncodedViewportCapture> {
+    const fmt: 'jpeg' | 'png' = format === 'png' ? 'png' : 'jpeg';
+    return await this._withViewportQueue(instanceId, async () => {
+      const raw = await this._captureViewportRawNow(instanceId, targetRole, fmt === 'png' && downscale <= 1 ? 'png' : 'rgba8');
+      return raw.success ? this._encodeViewportCapture(raw, fmt, quality, maxBytes, downscale) : raw;
+    });
+  }
+
+  // Captures `count` frames `intervalMs` apart. The caller holds the viewport
+  // queue, so no other capture or marker transaction runs in between.
+  private async _captureViewportFramesNow(
+    instanceId: string,
+    targetRole: string,
+    encoding: 'png' | 'rgba8',
+    count: number,
+    intervalMs: number,
+  ): Promise<ViewportFramesCapture> {
+    const startedAt = Date.now();
+    const frames: Array<{ capture: RawViewportCaptureOk; atMs: number }> = [];
+    for (let index = 0; index < count; index++) {
+      const wait = startedAt + index * intervalMs - Date.now();
+      if (wait > 0) await sleep(wait);
+      const atMs = Date.now() - startedAt;
+      const capture = await this._captureViewportRawNow(instanceId, targetRole, encoding);
+      if (!capture.success) return { ...capture, error: `frame ${index + 1} of ${count}: ${capture.error}` };
+      frames.push({ capture, atMs });
+    }
+    return { success: true, frames };
+  }
+
+  // Serializes viewport readers and marker transactions per Studio process.
+  private async _withViewportQueue<T>(instanceId: string, run: () => Promise<T>): Promise<T> {
     const previous = this.viewportCaptureQueues.get(instanceId) ?? Promise.resolve();
-    const capture = previous.then(() => this._captureViewportImageNow(instanceId, targetRole, format, quality, maxBytes, downscale));
+    const capture = previous.then(run);
     const settled = capture.then(() => undefined, () => undefined);
     this.viewportCaptureQueues.set(instanceId, settled);
     try {
@@ -6204,16 +7350,23 @@ export class RobloxStudioTools {
     }
   }
 
-  private async _captureViewportImageNow(
+  // One unencoded viewport frame, from Studio or from the host window.
+  // `encoding` only picks what Studio's fast path returns; the host window and
+  // the CaptureService fallbacks always answer with raw RGBA.
+  private async _captureViewportRawNow(
     instanceId: string,
     targetRole: string,
-    format?: string,
-    quality?: number,
-    maxBytes: number = MAX_INLINE_IMAGE_BYTES,
-    downscale = 1,
-  ): Promise<EncodedViewportCapture> {
-    const fmt: 'jpeg' | 'png' = format === 'png' ? 'png' : 'jpeg';
-    const q = quality === undefined ? 92 : Math.max(1, Math.min(100, Math.floor(quality)));
+    encoding: 'png' | 'rgba8',
+  ): Promise<RawViewportCapture> {
+    // Native Linux runs Studio under Wine, where Studio's own capture of the
+    // play viewport fails or comes back black. When the Studio process is
+    // known, grab its X11 window first and use Studio's capture as the fallback.
+    let hostFirstError: string | undefined;
+    if (isHostCapturePreferred() && await this._hostCaptureProcessId(instanceId) !== undefined) {
+      const host = await this._captureViewportFromHostWindow(instanceId, targetRole);
+      if (host.success) return { success: true, response: host.response, hostNote: '' };
+      hostFirstError = host.error;
+    }
 
     // Fast path: StudioCaptureService (Studio-only, FFlag-gated) reads the
     // framebuffer directly — no CaptureService callback, no EditableImage
@@ -6229,7 +7382,7 @@ export class RobloxStudioTools {
     // rendering peer: 'edit' when idle, 'client-N' during a playtest.
     let response = await this._callSingle(
       '/api/capture-studio',
-      { encoding: fmt === 'png' && downscale <= 1 ? 'png' : 'rgba8' },
+      { encoding },
       targetRole,
       instanceId,
     ) as RawImageCaptureResponse;
@@ -6243,6 +7396,15 @@ export class RobloxStudioTools {
       (response.error?.includes('/api/capture-studio') ?? false);
     const studioFastPathUnavailable = studioFastPathMissing ? response.unavailable ?? response.error : undefined;
 
+    if (studioFastPathMissing && hostFirstError === undefined && isHostCapturePreferred()) {
+      // A Studio this server did not launch has no known process, so it skips
+      // the host-first grab above. Grab its window before falling back to
+      // CaptureService, which hands Wine play clients black frames; every
+      // Studio display is searched and the viewport markers pick the window.
+      const host = await this._captureViewportFromHostWindow(instanceId, targetRole);
+      if (host.success) return { success: true, response: host.response, hostNote: '', studioFastPathUnavailable };
+      hostFirstError = host.error;
+    }
     if (studioFastPathMissing) {
       if (targetRole.startsWith('client-')) {
         // Play mode. The running game VM can trigger CaptureScreenshot but can't
@@ -6251,7 +7413,12 @@ export class RobloxStudioTools {
         // the rbxtemp handle is process-scoped and the edit/plugin identity is
         // allowed to promote it into a readable EditableImage.
         const begin = await this._callSingle('/api/capture-begin', {}, targetRole, instanceId) as {
-          contentId?: string; error?: string; viewportWidth?: number; viewportHeight?: number;
+          contentId?: string;
+          error?: string;
+          viewportWidth?: number;
+          viewportHeight?: number;
+          screenWidth?: number;
+          screenHeight?: number;
         };
         if (begin.error) {
           response = { error: begin.error };
@@ -6262,6 +7429,10 @@ export class RobloxStudioTools {
           // The edit peer read the pixels; the client's viewport is the one input lands in.
           response.viewportWidth ??= begin.viewportWidth;
           response.viewportHeight ??= begin.viewportHeight;
+          // Only the client DM can measure its simulated screen; the edit DM reads pixels.
+          if (!response.error && begin.screenWidth && begin.screenHeight) {
+            response = { ...response, screenWidth: begin.screenWidth, screenHeight: begin.screenHeight };
+          }
         }
       } else {
         // Edit mode: capture and read back in the same (edit) context.
@@ -6288,7 +7459,15 @@ export class RobloxStudioTools {
       response = { ...response, error: `Could not decode Studio's screenshot: ${error instanceof Error ? error.message : String(error)}` };
       hostReason = `Studio's capture failed (${response.error})`;
     }
-    if (hostReason !== undefined) {
+    if (hostFirstError !== undefined) {
+      if (response.error) {
+        response = { ...response, error: `${response.error} Host window capture failed first: ${hostFirstError}.` };
+      } else {
+        hostNote = hostReason === undefined
+          ? ` Host window capture failed (${hostFirstError}), so this came from Studio's ${response.source ?? 'capture'}.`
+          : ` Warning: host window capture failed (${hostFirstError}) and ${hostReason}, so this image may be blank.`;
+      }
+    } else if (hostReason !== undefined) {
       const host = await this._captureViewportFromHostWindow(instanceId, targetRole);
       if (host.success) {
         response = host.response;
@@ -6315,8 +7494,37 @@ export class RobloxStudioTools {
       }
       return { success: false, error: text, studioFastPathUnavailable };
     }
+    let deviceScreen: { width: number; height: number } | undefined;
+    try {
+      const resampled = resampleCaptureToDeviceScreen(response);
+      if (resampled) {
+        deviceScreen = { width: resampled.nativeWidth ?? 0, height: resampled.nativeHeight ?? 0 };
+        response = resampled;
+      }
+    } catch (error) {
+      return {
+        success: false,
+        error: `Could not resample the screenshot to the simulated device screen: ${error instanceof Error ? error.message : String(error)}`,
+        studioFastPathUnavailable,
+      };
+    }
+    if (response.width === undefined || response.height === undefined) {
+      return { success: false, error: 'Screenshot response missing dimensions.', studioFastPathUnavailable };
+    }
+    return { success: true, response, hostNote, studioFastPathUnavailable, ...(deviceScreen ? { deviceScreen } : {}) };
+  }
 
+  private _encodeViewportCapture(
+    raw: RawViewportCaptureOk,
+    fmt: 'jpeg' | 'png',
+    quality: number | undefined,
+    maxBytes: number,
+    downscale = 1,
+  ): EncodedViewportCapture {
+    const { hostNote, studioFastPathUnavailable, deviceScreen } = raw;
+    let response = raw.response;
     if (response.encoding !== 'png') response = downscaleRgbaResponse(response, downscale);
+    const q = quality === undefined ? 92 : Math.max(1, Math.min(100, Math.floor(quality)));
     const w = response.width;
     const h = response.height;
     if (w === undefined || h === undefined) {
@@ -6380,7 +7588,8 @@ export class RobloxStudioTools {
     const viewportH = response.viewportHeight ?? response.nativeHeight ?? h;
     const message =
       `Screenshot ${w}x${h}px (${fmt}${fmt === 'jpeg' ? ` q${usedQ}` : ''})${note}` +
-      (viewportW !== w || viewportH !== h ? ` of the ${viewportW}x${viewportH} viewport.` : '.') + hostNote;
+      (viewportW !== w || viewportH !== h ? ` of the ${viewportW}x${viewportH} viewport.` : '.') +
+      deviceScreenNote(deviceScreen) + hostNote;
 
     return {
       success: true,
@@ -6422,6 +7631,31 @@ export class RobloxStudioTools {
     return await this._callSingle('/api/capture-markers', { action, ...(captureId ? { captureId } : {}) }, targetRole, instanceId) as ViewportMarkerResponse;
   }
 
+  // Linux only: the managed Studio process that owns the viewport, so the X11
+  // grab searches its display first. Multiplayer client instances are not
+  // managed; their group's controller runs on the same display. Cached as long
+  // as a located viewport, because the lookup snapshots processes.
+  private async _hostCaptureProcessId(instanceId: string): Promise<number | undefined> {
+    // WSL grabs through the Windows helper, which takes no process hint.
+    if (!isNativeLinuxHost()) return undefined;
+    const cached = this.hostCaptureProcessIds.get(instanceId);
+    if (cached && (cached.discovered || Date.now() - cached.cachedAt < HOST_VIEWPORT_RECT_TTL_MS)) return cached.processId;
+    const controller = this.bridge.getMultiplayerGroups()
+      .find((group) => group.instanceIds.includes(instanceId))?.controllerInstanceId;
+    let processId: number | undefined;
+    for (const candidate of [instanceId, controller]) {
+      if (candidate === undefined || processId !== undefined) continue;
+      try {
+        const record = await this.instanceManager.get(candidate);
+        if (record && record.closedAt === undefined) processId = record.nativeProcessId;
+      } catch {
+        // Without a hint every Studio display is searched; capture still works.
+      }
+    }
+    this.hostCaptureProcessIds.set(instanceId, { processId, cachedAt: Date.now() });
+    return processId;
+  }
+
   // Always restore the simulator, including failures and cached window grabs.
   private async _captureViewportFromHostWindow(
     instanceId: string,
@@ -6435,6 +7669,8 @@ export class RobloxStudioTools {
     if (!isHostCaptureSupported()) {
       return { success: false, error: hostCaptureUnsupportedReason() };
     }
+    const linuxUnavailable = linuxHostCaptureUnavailableReason();
+    if (linuxUnavailable !== undefined) return { success: false, error: linuxUnavailable };
     // Cold Swift compilation must finish before the plugin starts its bounded
     // marker transaction. Injected backends need no host helper preparation.
     if (this.hostWindowCapture === captureStudioWindow) {
@@ -6444,6 +7680,8 @@ export class RobloxStudioTools {
         return { success: false, error: `could not prepare host capture: ${error instanceof Error ? error.message : String(error)}` };
       }
     }
+    // The registry lookup (a process snapshot) overlaps the plugin round trip.
+    const processIdLookup = this._hostCaptureProcessId(instanceId);
     let prepared: ViewportMarkerResponse | undefined;
     let result: HostViewportCaptureResult;
     try {
@@ -6452,7 +7690,7 @@ export class RobloxStudioTools {
         result = { success: false, error: prepared.error ?? 'the Studio plugin could not prepare host capture (update the plugin)' };
       } else {
         if (prepared.viewportChanged) this.hostViewportRects.delete(`${instanceId}|${targetRole}`);
-        result = await this._capturePreparedViewportFromHostWindow(instanceId, targetRole, prepared);
+        result = await this._capturePreparedViewportFromHostWindow(instanceId, targetRole, prepared, await processIdLookup);
       }
     } catch (error) {
       result = { success: false, error: `host capture failed: ${error instanceof Error ? error.message : String(error)}` };
@@ -6475,10 +7713,13 @@ export class RobloxStudioTools {
   // of `targetRole`. The plugin pins magenta markers to the viewport corners
   // so the crop is exact regardless of Studio's dock layout or DPI scale; the
   // located rect is cached briefly so repeated captures cost one window grab.
+  // On Linux the markers also pick the right window when several Studio
+  // windows share a display (multiplayer server and clients).
   private async _capturePreparedViewportFromHostWindow(
     instanceId: string,
     targetRole: string,
     prepared: ViewportMarkerResponse,
+    processId?: number,
   ): Promise<HostViewportCaptureResult> {
     const titleHint = this._hostCaptureTitleHint(instanceId);
     const cacheKey = `${instanceId}|${targetRole}`;
@@ -6509,7 +7750,7 @@ export class RobloxStudioTools {
       cached.viewportWidth === viewportWidth &&
       cached.viewportHeight === viewportHeight
     ) {
-      const grab = await this.hostWindowCapture(titleHint, cached.identity);
+      const grab = await this.hostWindowCapture(titleHint, cached.identity, { processId });
       if (!grab.ok) return { success: false, error: grab.error };
       if (cached.identity !== undefined && !sameHostWindowIdentity(grab.capture.identity, cached.identity)) {
         return { success: false, error: 'the Studio window identity changed since locating the viewport; retry the capture' };
@@ -6532,25 +7773,30 @@ export class RobloxStudioTools {
     }
     if (shown.error) return { success: false, error: `could not draw viewport markers: ${shown.error}` };
     const markerSize = shown.markerSize ?? 12;
+    const markerHint: ViewportMarkerHint = {
+      viewportWidth: shown.viewportWidth ?? viewportWidth,
+      viewportHeight: shown.viewportHeight ?? viewportHeight,
+      markerSize,
+      markerLayout: shown.markerLayout === 'edges' ? 'edges' : 'corners',
+    };
 
     let markerGrab: HostCaptureResult;
     let hidden: ViewportMarkerResponse;
     try {
-      markerGrab = await this.hostWindowCapture(titleHint);
+      markerGrab = await this.hostWindowCapture(titleHint, undefined, {
+        processId,
+        accept: (capture) => !('error' in findViewportRect(capture.rgba, capture.width, capture.height, markerHint)),
+      });
     } finally {
       hidden = await this._callViewportMarkers('hide', targetRole, instanceId, prepared.captureId);
     }
     if (hidden.error) return { success: false, error: `could not hide viewport markers: ${hidden.error}` };
     if (!markerGrab.ok) return { success: false, error: markerGrab.error };
 
-    const located = findViewportRect(markerGrab.capture.rgba, markerGrab.capture.width, markerGrab.capture.height, {
-      viewportWidth: shown.viewportWidth ?? viewportWidth,
-      viewportHeight: shown.viewportHeight ?? viewportHeight,
-      markerSize,
-    });
+    const located = locateViewportInFrame(markerGrab.capture.rgba, markerGrab.capture.width, markerGrab.capture.height, markerHint, 'window');
     if ('error' in located) return { success: false, error: located.error };
 
-    const cleanGrab = await this.hostWindowCapture(titleHint, markerGrab.capture.identity);
+    const cleanGrab = await this.hostWindowCapture(titleHint, markerGrab.capture.identity, { processId });
     if (!cleanGrab.ok) return { success: false, error: cleanGrab.error };
     if (markerGrab.capture.identity !== undefined && !sameHostWindowIdentity(cleanGrab.capture.identity, markerGrab.capture.identity)) {
       return { success: false, error: 'the Studio window identity changed while locating the viewport; retry the capture' };
@@ -6568,6 +7814,12 @@ export class RobloxStudioTools {
       viewportHeight,
       cachedAt: Date.now(),
     });
+    // A Studio missing from the registry is named by the window that showed
+    // its markers, so later captures go host-first.
+    const windowProcessId = markerGrab.capture.identity?.processId;
+    if (processId === undefined && windowProcessId !== undefined) {
+      this.hostCaptureProcessIds.set(instanceId, { processId: windowProcessId, cachedAt: Date.now(), discovered: true });
+    }
     return {
       success: true,
       response: this._hostResponseFromCrop(cleanGrab.capture.rgba, cleanGrab.capture.width, cleanGrab.capture.height, located.rect, viewportWidth, viewportHeight),
@@ -6597,28 +7849,62 @@ export class RobloxStudioTools {
     };
   }
 
-  async captureScreenshot(instance_id?: string, format?: string, quality?: number, options: { full_size?: boolean; verbose?: boolean } = {}) {
+  async captureScreenshot(
+    instance_id?: string,
+    format?: string,
+    quality?: number,
+    options: { full_size?: boolean; verbose?: boolean } & ScreenshotSequenceOptions = {},
+  ) {
+    const frames = options.frames ?? 1;
+    if (!Number.isInteger(frames) || frames < 1 || frames > MAX_SCREENSHOT_FRAMES) {
+      throw new Error(`frames must be an integer from 1 to ${MAX_SCREENSHOT_FRAMES}`);
+    }
+    const intervalMs = options.interval_ms ?? DEFAULT_SCREENSHOT_INTERVAL_MS;
+    if (!Number.isInteger(intervalMs) || intervalMs < 0 || intervalMs > MAX_SCREENSHOT_INTERVAL_MS) {
+      throw new Error(`interval_ms must be an integer from 0 to ${MAX_SCREENSHOT_INTERVAL_MS}`);
+    }
+    if ((frames - 1) * intervalMs > MAX_SCREENSHOT_SEQUENCE_MS) {
+      throw new Error(`frames x interval_ms spans ${(frames - 1) * intervalMs}ms; keep (frames - 1) * interval_ms within ${MAX_SCREENSHOT_SEQUENCE_MS}ms`);
+    }
+    const fmt: 'jpeg' | 'png' = format === 'png' ? 'png' : 'jpeg';
     const refresh = this.bridge.refreshTopologyForRouting();
     if (refresh) await refresh;
     const { instanceId, clientRole } = this._resolveRuntime(instance_id);
     const role = clientRole ?? 'edit';
-    const capture = await this._captureViewportImage(instanceId, role, format, quality, undefined,
-      options.verbose === false && !options.full_size ? 2 : 1);
-    if (!capture.success) {
-      return this._textResult({ error: capture.error, studioFastPathUnavailable: capture.studioFastPathUnavailable });
-    }
-    const scale = { x: capture.viewportWidth / capture.width, y: capture.viewportHeight / capture.height };
-    const key = `${instanceId}|${role}`;
-    if (scale.x === 1 && scale.y === 1) this.screenshotInputScales.delete(key);
-    else this.screenshotInputScales.set(key, scale);
-    const message = `${capture.message} For simulate_mouse_input and simulate_input_sequence, x/y are pixel ` +
-      `coordinates in this exact image with (0,0) at the top-left; use coordinates as you read them off the image` +
-      (this.screenshotInputScales.has(key)
-        ? ` (the server multiplies x by ${scale.x.toFixed(4)} and y by ${scale.y.toFixed(4)} to reach viewport pixels).`
-        : '.');
+    const targetRole = role;
 
-    if (options.verbose === false) {
-      // Compact (this fork): the size, and the viewport when input coordinates are scaled.
+    if (frames === 1 && !options.grid) {
+      const capture = await this._captureViewportImage(instanceId, role, fmt, quality, undefined,
+        options.verbose === false && !options.full_size ? 2 : 1);
+      if (!capture.success) {
+        return this._textResult({ error: capture.error, studioFastPathUnavailable: capture.studioFastPathUnavailable });
+      }
+      const scale = { x: capture.viewportWidth / capture.width, y: capture.viewportHeight / capture.height };
+      const key = `${instanceId}|${role}`;
+      if (scale.x === 1 && scale.y === 1) this.screenshotInputScales.delete(key);
+      else this.screenshotInputScales.set(key, scale);
+      const message = `${capture.message} For simulate_mouse_input and simulate_input_sequence, x/y are pixel ` +
+        `coordinates in this exact image with (0,0) at the top-left; use coordinates as you read them off the image` +
+        (this.screenshotInputScales.has(key)
+          ? ` (the server multiplies x by ${scale.x.toFixed(4)} and y by ${scale.y.toFixed(4)} to reach viewport pixels).`
+          : '.');
+
+      if (options.verbose === false) {
+        // Compact (this fork): the size, and the viewport when input coordinates are scaled.
+        return {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify({
+                width: capture.width,
+                height: capture.height,
+                ...(this.screenshotInputScales.has(key) ? { viewport: `${capture.viewportWidth}x${capture.viewportHeight}` } : {}),
+              }),
+            },
+            { type: 'image', data: capture.data, mimeType: capture.mimeType },
+          ],
+        };
+      }
       return {
         content: [
           {
@@ -6626,37 +7912,478 @@ export class RobloxStudioTools {
             text: JSON.stringify({
               width: capture.width,
               height: capture.height,
-              ...(this.screenshotInputScales.has(key) ? { viewport: `${capture.viewportWidth}x${capture.viewportHeight}` } : {}),
+              format: capture.format,
+              mimeType: capture.mimeType,
+              ...(capture.quality === undefined ? {} : { quality: capture.quality }),
+              viewportWidth: capture.viewportWidth,
+              viewportHeight: capture.viewportHeight,
+              message,
+              source: capture.source,
+              studioFastPathUnavailable: capture.studioFastPathUnavailable,
             }),
           },
-          { type: 'image', data: capture.data, mimeType: capture.mimeType },
+          {
+            type: 'image',
+            data: capture.data,
+            mimeType: capture.mimeType,
+          },
         ],
       };
+    }
+
+    // A contact sheet is built from raw RGBA frames: Studio-encoded PNGs would
+    // have to be decoded again, and that decoder downsizes large images. The
+    // sheet is re-encoded in the requested format anyway.
+    const encoding = options.grid || fmt === 'jpeg' ? 'rgba8' : 'png';
+    const captured = await this._withViewportQueue(instanceId, () =>
+      this._captureViewportFramesNow(instanceId, targetRole, encoding, frames, intervalMs));
+    if (!captured.success) {
+      return this._textResult({ error: captured.error, studioFastPathUnavailable: captured.studioFastPathUnavailable });
+    }
+    const timeline = captured.frames.map(({ capture, atMs }, index) => ({
+      frame: index + 1,
+      atMs,
+      width: capture.response.width,
+      height: capture.response.height,
+      source: capture.response.source,
+    }));
+    const notes = [...new Set(captured.frames.map(({ capture }) => capture.hostNote).filter(Boolean))].join('');
+    const studioFastPathUnavailable = captured.frames.find(({ capture }) => capture.studioFastPathUnavailable)?.capture.studioFastPathUnavailable;
+
+    if (options.grid) {
+      let sheet: ContactSheet;
+      try {
+        sheet = composeContactSheet(captured.frames.map(({ capture }) => (
+          { width: capture.response.width ?? 0, height: capture.response.height ?? 0, rgba: Buffer.from(capture.response.data ?? '', 'base64') })));
+      } catch (error) {
+        return this._textResult({ error: `Could not compose the contact sheet: ${errorMessage(error)}` });
+      }
+      const encoded = this._encodeViewportCapture({
+        success: true,
+        response: { encoding: 'rgba8', source: 'contact-sheet', width: sheet.width, height: sheet.height, data: sheet.rgba.toString('base64') },
+        hostNote: '',
+      }, fmt, quality, MAX_INLINE_IMAGE_BYTES);
+      if (!encoded.success) return this._textResult({ error: encoded.error });
+      return {
+        content: [
+          {
+            type: 'text',
+            text: JSON.stringify({
+              frames: timeline,
+              grid: { columns: sheet.columns, rows: sheet.rows, width: sheet.width, height: sheet.height, tileWidth: sheet.tileWidth, tileHeight: sheet.tileHeight },
+              format: encoded.format,
+              mimeType: encoded.mimeType,
+              ...(encoded.quality === undefined ? {} : { quality: encoded.quality }),
+              message:
+                `Contact sheet of ${frames} frames ${intervalMs}ms apart: ${sheet.columns}x${sheet.rows} tiles of ` +
+                `${sheet.tileWidth}x${sheet.tileHeight}px, numbered left to right then top to bottom${encoded.note}. Tiles are ` +
+                'scaled, so take simulate_mouse_input coordinates from a single-frame capture, not from this sheet.' + notes,
+              studioFastPathUnavailable,
+            }),
+          },
+          { type: 'image', data: encoded.data, mimeType: encoded.mimeType },
+        ],
+      };
+    }
+
+    // Separate images share the inline budget.
+    const budget = Math.floor(MAX_INLINE_IMAGE_BYTES / frames);
+    const images: EncodedViewportImage[] = [];
+    for (const [index, { capture }] of captured.frames.entries()) {
+      // Host-capture notes are reported once for the whole sequence below.
+      const encoded = this._encodeViewportCapture({ ...capture, hostNote: '' }, fmt, quality, budget);
+      if (!encoded.success) {
+        return this._textResult({ error: `frame ${index + 1} of ${frames}: ${encoded.error} Pass grid: true to get one contact sheet instead.` });
+      }
+      images.push(encoded);
     }
     return {
       content: [
         {
           type: 'text',
           text: JSON.stringify({
-            width: capture.width,
-            height: capture.height,
-            format: capture.format,
-            mimeType: capture.mimeType,
-            ...(capture.quality === undefined ? {} : { quality: capture.quality }),
-            viewportWidth: capture.viewportWidth,
-            viewportHeight: capture.viewportHeight,
-            message,
-            source: capture.source,
-            studioFastPathUnavailable: capture.studioFastPathUnavailable,
+            frames: timeline,
+            format: fmt,
+            mimeType: images[0].mimeType,
+            message: `${frames} frames ${intervalMs}ms apart follow in order. Frame 1: ${images[0].message}` + notes,
+            studioFastPathUnavailable,
           }),
         },
-        {
-          type: 'image',
-          data: capture.data,
-          mimeType: capture.mimeType,
-        },
+        ...images.map((image) => ({ type: 'image' as const, data: image.data, mimeType: image.mimeType })),
       ],
     };
+  }
+
+  // capture_video records the viewport on the MCP host (see video-recorder.ts)
+  // and answers with the MP4 path plus a storyboard image the agent can read.
+  async captureVideo(request: Record<string, unknown> = {}, instance_id?: string) {
+    const action = request.action ?? 'record';
+    if (!isVideoAction(action)) {
+      throw new Error(`action must be one of ${VIDEO_ACTIONS.join(', ')}`);
+    }
+    if (action === 'storyboard') return await this._videoStoryboard(request);
+    for (const key of ['input_path', 'start_ms', 'end_ms']) {
+      if (request[key] !== undefined) throw new Error(`${key} is only used with action="storyboard"`);
+    }
+
+    if (action === 'stop') {
+      const recording = this._activeVideoRecording(instance_id);
+      const frames = clampedInteger(request.frames, 'frames', 0, VIDEO_MAX_STORYBOARD_FRAMES, recording.storyboardFrames);
+      this.videoRecordings.delete(recording.instanceId);
+      const exit = recording.exit ?? await recording.process.stop();
+      return await this._finishVideo(action, recording, exit, frames);
+    }
+
+    if (action === 'start' && request.duration_ms !== undefined) {
+      throw new Error(`duration_ms is only used with action="record"; action="start" records until action="stop" (at most ${VIDEO_START_MAX_DURATION_MS} ms)`);
+    }
+    const storyboardFrames = clampedInteger(request.frames, 'frames', 0, VIDEO_MAX_STORYBOARD_FRAMES, VIDEO_DEFAULT_STORYBOARD_FRAMES);
+    const fps = clampedInteger(request.fps, 'fps', 1, VIDEO_MAX_FPS, VIDEO_DEFAULT_FPS);
+    const durationMs = clampedInteger(request.duration_ms, 'duration_ms', VIDEO_MIN_DURATION_MS, VIDEO_MAX_DURATION_MS, VIDEO_DEFAULT_DURATION_MS);
+    // For record the encoder's own limit is only a backstop; record stops it on time.
+    const maxDurationMs = action === 'record' ? durationMs + 10_000 : VIDEO_START_MAX_DURATION_MS;
+    const outputPath = request.output_path;
+    if (outputPath !== undefined && (typeof outputPath !== 'string' || !outputPath.toLowerCase().endsWith('.mp4'))) {
+      throw new Error('output_path must be a path ending in .mp4');
+    }
+
+    const started = await this._startVideoRecording(instance_id, { fps, maxDurationMs, storyboardFrames, outputPath });
+    if (!started.ok) return this._textResult({ action, error: started.error });
+    const { recording, width, height } = started;
+
+    if (action === 'start') {
+      return this._textResult({
+        action,
+        recording: true,
+        target: recording.targetRole,
+        video: { path: recording.outputPath, fps, width, height, encoder: recording.encoder, source: recording.source },
+        max_duration_ms: maxDurationMs,
+        message:
+          'Recording the Studio viewport. Trigger the scene now (for example with execute_luau, eval_client_runtime, ' +
+          `or simulated input), then call capture_video action="stop". It stops itself after ${maxDurationMs} ms.`,
+      });
+    }
+
+    const remaining = Math.max(0, recording.startedAt + durationMs - Date.now());
+    await settledWithin(recording.process.done, remaining);
+    if (this.videoRecordings.get(recording.instanceId) === recording) this.videoRecordings.delete(recording.instanceId);
+    const exit = recording.exit ?? await recording.process.stop();
+    return await this._finishVideo(action, recording, exit, storyboardFrames);
+  }
+
+  private _activeVideoRecording(instance_id?: string): ActiveVideoRecording {
+    if (instance_id !== undefined) {
+      const key = this.bridge.resolveConnectedInstanceId(instance_id) ?? instance_id;
+      const recording = this.videoRecordings.get(key) ?? this.videoRecordings.get(instance_id);
+      if (!recording) {
+        throw new Error(`No capture_video recording is active for instance_id "${instance_id}". Start one with action="start".`);
+      }
+      return recording;
+    }
+    const recordings = [...this.videoRecordings.values()];
+    if (recordings.length === 1) return recordings[0];
+    if (recordings.length === 0) throw new Error('No capture_video recording is active. Start one with action="start".');
+    throw new Error(`Several capture_video recordings are active (${recordings.map((r) => r.instanceId).join(', ')}); pass instance_id.`);
+  }
+
+  private async _startVideoRecording(
+    instance_id: string | undefined,
+    options: { fps: number; maxDurationMs: number; storyboardFrames: number; outputPath?: string },
+  ): Promise<{ ok: true; recording: ActiveVideoRecording; width: number; height: number } | { ok: false; error: string }> {
+    const unsupported = videoRecordingUnsupportedReason();
+    if (unsupported) return { ok: false, error: unsupported };
+    if (isHostCaptureDisabled()) {
+      return { ok: false, error: 'video recording reads the Studio window, and host window capture is disabled by ROBLOX_STUDIO_HOST_CAPTURE' };
+    }
+    const refresh = this.bridge.refreshTopologyForRouting();
+    if (refresh) await refresh;
+    const { instanceId, clientRole } = this._resolveRuntime(instance_id);
+    const targetRole = clientRole ?? 'edit';
+    const existing = this.videoRecordings.get(instanceId);
+    if (this.videoStarting.has(instanceId) || (existing && existing.exit === undefined)) {
+      return {
+        ok: false,
+        error: `A capture_video recording is already running for this Studio${existing ? ` (${existing.outputPath})` : ''}. Call action="stop" first.`,
+      };
+    }
+    this.videoStarting.add(instanceId);
+    try {
+      const probe = await this.videoRecorder.probe();
+      if (!probe.ok) return { ok: false, error: probe.error };
+      const outputPath = path.resolve(options.outputPath ?? defaultVideoPath());
+      await fs.promises.mkdir(path.dirname(outputPath), { recursive: true });
+      if (options.outputPath === undefined) await pruneDefaultVideos(path.dirname(outputPath));
+
+      const located = await this._withViewportQueue(
+        instanceId, () => this._locateVideoViewport(instanceId, targetRole, probe.ffmpegPath, probe.sources),
+      );
+      if (!located.success) return { ok: false, error: `Could not locate the Studio viewport: ${located.error}` };
+
+      const encoderProcess = this.videoRecorder.start({
+        ffmpegPath: probe.ffmpegPath,
+        encoder: probe.encoder,
+        source: located.source,
+        windowId: located.windowId,
+        x11Session: located.x11Session,
+        crop: located.rect,
+        frameWidth: located.frameWidth,
+        frameHeight: located.frameHeight,
+        fps: options.fps,
+        maxDurationMs: options.maxDurationMs,
+        outputPath,
+      });
+      const recording: ActiveVideoRecording = {
+        instanceId,
+        targetRole,
+        outputPath,
+        ffmpegPath: probe.ffmpegPath,
+        encoder: probe.encoder,
+        source: located.source,
+        fps: options.fps,
+        maxDurationMs: options.maxDurationMs,
+        storyboardFrames: options.storyboardFrames,
+        startedAt: Date.now(),
+        process: encoderProcess,
+      };
+      void encoderProcess.done.then((exit) => { recording.exit = exit; });
+      this.videoRecordings.set(instanceId, recording);
+      // A rejected window handle or encoder fails within moments; report it now
+      // rather than after the agent has played the whole scene.
+      const early = await settledWithin(encoderProcess.done, this.videoStartGraceMs);
+      if (early !== undefined) {
+        if (this.videoRecordings.get(instanceId) === recording) this.videoRecordings.delete(instanceId);
+        return {
+          ok: false,
+          error: early.ok ? 'ffmpeg stopped right after starting; nothing was recorded' : `Could not record the Studio window: ${early.error}`,
+        };
+      }
+      return { ok: true, recording, width: located.rect.width - (located.rect.width % 2), height: located.rect.height - (located.rect.height % 2) };
+    } finally {
+      this.videoStarting.delete(instanceId);
+    }
+  }
+
+  // Finds the Studio window and the viewport rect inside the frames the
+  // recorder will see. The markers are drawn and grabbed through the same
+  // capture source as the recording, so no DPI conversion is involved.
+  private async _locateVideoViewport(
+    instanceId: string,
+    targetRole: string,
+    ffmpegPath: string,
+    sources: CaptureSource[],
+  ): Promise<VideoViewportLocation> {
+    // Windows and WSL identify the window up front (their helper rejects
+    // ambiguous matches). On native Linux several Studio windows can share a
+    // display (a multiplayer test), so the window is chosen once the markers
+    // are shown, by which one shows them; no markers are drawn without a
+    // Studio on an X display.
+    let identity: HostWindowIdentity | undefined;
+    if (isNativeLinuxHost()) {
+      const unavailable = linuxHostCaptureUnavailableReason();
+      if (unavailable !== undefined) return { success: false, error: unavailable };
+    } else {
+      const window = await this.hostWindowCapture(this._hostCaptureTitleHint(instanceId));
+      if (!window.ok) return { success: false, error: window.error };
+      identity = window.capture.identity;
+      if (identity === undefined) return { success: false, error: 'the host window capture did not identify the Studio window' };
+    }
+
+    let prepared: ViewportMarkerResponse | undefined;
+    let result: VideoViewportLocation;
+    try {
+      prepared = await this._callViewportMarkers('prepare', targetRole, instanceId);
+      if (prepared.error || !prepared.captureId) {
+        result = { success: false, error: prepared.error ?? 'the Studio plugin could not prepare viewport markers (update the plugin)' };
+      } else if (prepared.viewportChanged) {
+        // prepare fitted a scaled simulated device to the window; finish restores
+        // the old scaling, which would move the viewport out from under the crop.
+        result = {
+          success: false,
+          error:
+            'device emulation is not using Fit to Window scaling, so the viewport would move once markers are removed. ' +
+            'Call set_device_simulator with scalingMode="FitToWindow" (or stopSimulation=true), then record again.',
+        };
+      } else {
+        result = await this._locateVideoViewportWithMarkers(instanceId, targetRole, prepared.captureId, ffmpegPath, identity, sources);
+      }
+    } catch (error) {
+      result = { success: false, error: errorMessage(error) };
+    } finally {
+      if (prepared?.captureId) {
+        try {
+          const restored = await this._callViewportMarkers('finish', targetRole, instanceId, prepared.captureId);
+          if (restored.error) result = { success: false, error: `could not restore the Studio viewport: ${restored.error}` };
+          else if (restored.stale || !restored.success) result = { success: false, error: 'the viewport marker transaction expired; retry' };
+        } catch (error) {
+          result = { success: false, error: `could not restore the Studio viewport: ${errorMessage(error)}` };
+        }
+      }
+    }
+    return result;
+  }
+
+  private async _locateVideoViewportWithMarkers(
+    instanceId: string,
+    targetRole: string,
+    captureId: string,
+    ffmpegPath: string,
+    preidentified: HostWindowIdentity | undefined,
+    sources: CaptureSource[],
+  ): Promise<VideoViewportLocation> {
+    const shown = await this._callViewportMarkers('show', targetRole, instanceId, captureId);
+    if (shown.error || !shown.viewportWidth || !shown.viewportHeight) {
+      return { success: false, error: `could not draw viewport markers: ${shown.error ?? 'no viewport size reported'}` };
+    }
+    // Each source that can read the window is tried until its frame shows the
+    // markers: the marker frame and the recording must come from the same
+    // capture path, and one path can miss markers another sees.
+    const markerHint: ViewportMarkerHint = {
+      viewportWidth: shown.viewportWidth,
+      viewportHeight: shown.viewportHeight,
+      markerSize: shown.markerSize ?? 12,
+      markerLayout: shown.markerLayout === 'edges' ? 'edges' : 'corners',
+    };
+    let identity = preidentified;
+    let found: { source: CaptureSource; rect: ViewportRect; frameWidth: number; frameHeight: number } | undefined;
+    // Grab errors stay strings; unread frames are saved once the markers are gone.
+    const failures: Array<string | { source: CaptureSource; frame: { width: number; height: number; rgba: Buffer }; error: string }> = [];
+    let hidden: ViewportMarkerResponse;
+    try {
+      if (identity === undefined) {
+        // Native Linux: the Studio window that shows the markers, as for screenshots.
+        const window = await this.hostWindowCapture(this._hostCaptureTitleHint(instanceId), undefined, {
+          processId: await this._hostCaptureProcessId(instanceId),
+          accept: (capture) => !('error' in findViewportRect(capture.rgba, capture.width, capture.height, markerHint)),
+        });
+        if (!window.ok) failures.push(window.error);
+        else if (window.capture.identity === undefined) failures.push('the host window capture did not identify the Studio window');
+        else identity = window.capture.identity;
+      }
+      if (identity !== undefined) {
+        for (const candidate of sources) {
+          let frame: { width: number; height: number; rgba: Buffer };
+          try {
+            frame = await this.videoRecorder.grabWindowFrame(ffmpegPath, identity.windowId, candidate, identity.x11Session);
+          } catch (error) {
+            failures.push(errorMessage(error));
+            continue;
+          }
+          const located = findViewportRect(frame.rgba, frame.width, frame.height, markerHint);
+          if ('rect' in located) {
+            found = { source: candidate, rect: located.rect, frameWidth: frame.width, frameHeight: frame.height };
+            break;
+          }
+          failures.push({ source: candidate, frame, error: located.error });
+        }
+      }
+    } finally {
+      hidden = await this._callViewportMarkers('hide', targetRole, instanceId, captureId);
+    }
+    if (hidden.error) return { success: false, error: `could not hide viewport markers: ${hidden.error}` };
+    if (identity && found) return { success: true, windowId: identity.windowId, x11Session: identity.x11Session, ...found };
+    if (failures.every((failure) => typeof failure === 'string')) {
+      return { success: false, error: failures.join('; ') || 'no capture source is available' };
+    }
+    const reasons = failures.map((failure) => {
+      if (typeof failure === 'string') return failure;
+      const saved = saveViewportMarkerFrame(failure.frame.rgba, failure.frame.width, failure.frame.height, failure.source);
+      return `${failure.source} frame: ${failure.error}${saved ? `; marker frame saved to ${saved}` : ''}`;
+    }).join('; ');
+    return {
+      success: false,
+      error:
+        `${reasons}. capture_screenshot reads the window another way and may still work. Keep the Studio viewport visible and ` +
+        'uncovered; with a simulated device, try a larger Studio window, another device, or set_device_simulator stopSimulation=true, then record again.',
+    };
+  }
+
+  private async _finishVideo(action: VideoAction, recording: ActiveVideoRecording, exit: VideoRecordingExit, frames: number) {
+    const video: Record<string, unknown> = {
+      path: recording.outputPath, fps: recording.fps, encoder: recording.encoder, source: recording.source,
+    };
+    const body: Record<string, unknown> = { action, target: recording.targetRole, video };
+    if (!exit.ok) return this._textResult({ ...body, error: `The recording failed: ${exit.error}` });
+    let info: MediaInfo;
+    try {
+      info = await this.videoRecorder.mediaInfo(recording.ffmpegPath, recording.outputPath);
+    } catch (error) {
+      return this._textResult({ ...body, error: errorMessage(error) });
+    }
+    const stats = await fs.promises.stat(recording.outputPath).catch(() => undefined);
+    Object.assign(video, {
+      duration_ms: Math.round(info.durationSeconds * 1000),
+      width: info.width,
+      height: info.height,
+      ...(stats ? { bytes: stats.size } : {}),
+    });
+    if (action === 'stop' && exit.reason === 'duration_limit') {
+      body.stopped_by = 'max_duration';
+      body.message = `The recording reached its ${recording.maxDurationMs} ms limit and stopped itself before action="stop".`;
+    }
+    return await this._videoResultWithStoryboard(body, recording.ffmpegPath, recording.outputPath, info, 0, info.durationSeconds, frames);
+  }
+
+  private async _videoStoryboard(request: Record<string, unknown>) {
+    const inputPath = request.input_path;
+    if (typeof inputPath !== 'string' || inputPath === '') {
+      throw new Error('input_path is required for action="storyboard": a video.path from an earlier capture_video result');
+    }
+    const frames = clampedInteger(request.frames, 'frames', 1, VIDEO_MAX_STORYBOARD_FRAMES, VIDEO_DEFAULT_STORYBOARD_FRAMES);
+    const resolved = path.resolve(inputPath);
+    const ffmpegPath = ffmpegCommand();
+    const info = await this.videoRecorder.mediaInfo(ffmpegPath, resolved);
+    const durationMs = Math.round(info.durationSeconds * 1000);
+    const startMs = clampedInteger(request.start_ms, 'start_ms', 0, durationMs, 0);
+    const endMs = clampedInteger(request.end_ms, 'end_ms', 0, durationMs, durationMs);
+    if (endMs <= startMs) {
+      throw new Error(`end_ms must be after start_ms within the ${durationMs} ms video`);
+    }
+    const body: Record<string, unknown> = {
+      action: 'storyboard',
+      video: { path: resolved, duration_ms: durationMs, width: info.width, height: info.height },
+      window_ms: { start: startMs, end: endMs },
+    };
+    return await this._videoResultWithStoryboard(body, ffmpegPath, resolved, info, startMs / 1000, endMs / 1000, frames);
+  }
+
+  private async _videoResultWithStoryboard(
+    body: Record<string, unknown>,
+    ffmpegPath: string,
+    inputPath: string,
+    info: MediaInfo,
+    startSeconds: number,
+    endSeconds: number,
+    frames: number,
+  ) {
+    if (frames <= 0) return this._textResult(body);
+    try {
+      const sheet = await this.videoRecorder.storyboard({
+        ffmpegPath, inputPath, info, startSeconds, endSeconds, frames, maxWidth: VIDEO_STORYBOARD_MAX_WIDTH,
+      });
+      if (sheet.jpeg.length > MAX_INLINE_IMAGE_BYTES) throw new Error(`the storyboard is ${sheet.jpeg.length} bytes, over the inline image limit`);
+      body.storyboard = {
+        frames: sheet.timesSeconds.length,
+        columns: sheet.columns,
+        rows: sheet.rows,
+        width: sheet.width,
+        height: sheet.height,
+        times_ms: sheet.timesSeconds.map((t) => Math.round(t * 1000)),
+      };
+      const guide =
+        `The image is a ${sheet.columns}x${sheet.rows} storyboard read left to right, top to bottom; storyboard.times_ms ` +
+        'gives each frame\'s time in the video. To inspect a span closely, call capture_video action="storyboard" ' +
+        'with input_path, start_ms, and end_ms instead of recording again.';
+      body.message = typeof body.message === 'string' ? `${body.message} ${guide}` : guide;
+      return {
+        content: [
+          { type: 'text', text: JSON.stringify(body) },
+          { type: 'image', data: sheet.jpeg.toString('base64'), mimeType: 'image/jpeg' },
+        ],
+      };
+    } catch (error) {
+      body.storyboard_error = errorMessage(error);
+      return this._textResult(body);
+    }
   }
 }
 
@@ -6720,6 +8447,21 @@ export function readLuauSource(code: string | undefined, file: string | undefine
   if (!stat.isFile()) throw new Error(`${tool} file is not a regular file: ${resolved}`);
   if (stat.size > LUAU_FILE_BYTES) throw new Error(`${tool} file is ${stat.size} bytes; the limit is ${LUAU_FILE_BYTES}`);
   return fs.readFileSync(resolved, 'utf8');
+}
+
+// The prelude's failure rides on the eval's own JSON reply (this fork).
+function withPreludeError(result: ToolCallResult, preludeError: unknown): ToolCallResult {
+  if (preludeError === undefined) return result;
+  const first = result.content[0];
+  if (!first || first.type !== 'text') return result;
+  let body: unknown;
+  try {
+    body = JSON.parse(first.text);
+  } catch {
+    return result;
+  }
+  const merged = typeof body === 'object' && body !== null ? { ...(body as object), prelude_error: preludeError } : { result: body, prelude_error: preludeError };
+  return { ...result, content: [{ ...first, text: JSON.stringify(merged) }, ...result.content.slice(1)] };
 }
 
 export interface EvalJobOptions {

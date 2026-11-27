@@ -8,3 +8,5 @@ process.env.ROBLOXSTUDIO_MCP_MANAGED_INSTANCE_REGISTRY_DIR = join(
 );
 // Fork: nor write into the list of running servers (`npm run servers`).
 process.env.ROBLOX_MCP_REGISTRY_DIR = join(process.env.RSMCP_JEST_REGISTRY_ROOT, suite, 'servers');
+// Nor may they list or close the developer's live Studio test windows.
+process.env.ROBLOX_STUDIO_TEST_WINDOW_CLEANUP = 'off';

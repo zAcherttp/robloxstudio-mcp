@@ -19,17 +19,7 @@ if (installBundledOnly || installWithFallback) {
     process.exitCode = 1;
   });
 } else {
-  if (process.argv.includes('--auto-install-plugin')) {
-    await installBundledPlugin({
-      sourcePath: flagValue('--plugin-path'),
-      log: (message) => console.error(`[install-plugin] ${message}`),
-      warn: (message) => console.error(message),
-    }).catch((err) => {
-      console.error(
-        `[install-plugin] Auto-install skipped: ${err instanceof Error ? err.message : String(err)}`,
-      );
-    });
-  }
+  const autoInstallPlugin = process.argv.includes('--auto-install-plugin');
 
   const openCloudKey = flagValue('--open-cloud-key');
   const creatorId = flagValue('--creator-id');
@@ -54,6 +44,13 @@ if (installBundledOnly || installWithFallback) {
     version: VERSION,
     tools: getAllTools(),
     build: BUILD,
+    installStudioPlugin: autoInstallPlugin
+      ? () => installBundledPlugin({
+        sourcePath: flagValue('--plugin-path'),
+        log: (message) => console.error(`[install-plugin] ${message}`),
+        warn: (message) => console.error(message),
+      })
+      : undefined,
   });
 
   server.run().catch((error) => {

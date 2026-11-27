@@ -90,13 +90,58 @@ replacement signs the Windows account out of Studio. The wait reads only sign-in
 event names and times from Studio's log. It does not count against the close
 timeout, and a Studio that finished signing in closes without delay.
 
+Closing an edit Studio also closes the multiplayer test windows it started. A
+test window is its own Studio process, and it keeps running after its edit
+Studio is gone.
+
+## Multiplayer test windows
+
+Studio runs each window of a multiplayer playtest, the Server and every client,
+as its own Studio process: the Server is a child of the edit Studio, and each
+client is a child of the Server. On Windows and WSL, `multiplayer_playtest`
+finds these windows by process, so it also sees a window whose MCP plugin is
+still loading or never connected. It finds the edit Studio by its
+`manage_instance` launch, or else by a window title that names exactly one
+Studio:
+
+- `end` closes every test window that is still running after the playtest ends,
+  and reports `teardownConfirmed: true` only once none remains. It reports
+  `closedTestWindows` when it had to close any. While Studio still reports the
+  test starting, `end` keeps closing windows that Studio opens late.
+- A `start` whose peers do not all register before `ready_timeout_s` is ended
+  the same way, so a failed start leaves nothing running. A start whose peers
+  registered but did not answer an eval stays running for inspection, as before.
+- `start` refuses with `stale_test_windows` while test windows without a
+  connected plugin are open: they may be left from an earlier start, opened in
+  Studio, or another caller's start still loading. `end` closes them.
+- `status` reports `testWindows`, and `unansweredTestWindows` when some of them
+  have no connected plugin.
+
+On other platforms, `end` cannot see a window whose plugin is not connected. It
+then reports `teardownConfirmed: false` while Studio still reports the test as
+running; close those windows in Studio. Set
+`ROBLOX_STUDIO_TEST_WINDOW_CLEANUP=off` to never list or close test windows by
+process.
+
 ## Version compatibility
 
 The Studio plugin and MCP server must have the same version. `/ready` rejects a
 mismatched plugin rather than keeping an unsupported protocol pair connected.
+Rejections from the last 10 minutes are listed under `rejectedInstances` in
+`get_connected_instances` and `versionRejections` in `/health`, and a
+`manage_instance launch` that times out for this reason says so.
 
 Restart the MCP server with `--auto-install-plugin`, then fully close and reopen
 Studio to load the matching bundled plugin.
+
+Studio connects only to the MCP server that owns the Studio port (58741 unless
+`ROBLOX_STUDIO_PORT` is set). Every other session forwards to that server, so
+only the port owner installs the plugin. After an upgrade, a new session that
+starts while an older session still owns the port keeps using the older server
+and its plugin, and logs `Port <port> is owned by MCP server v<old>`. Close
+every MCP client that runs the older version: the new session then takes the
+port and installs its plugin. `GET http://localhost:58741/health` reports the
+port owner's `serverVersion`.
 
 ## Host window capture
 
@@ -109,7 +154,8 @@ whether the Studio window is focused. When the frame is a single colour, or
 Studio's capture errors outright, the server captures the Studio window through
 the host OS and crops it to the viewport:
 
-- The plugin briefly pins four magenta squares to the viewport corners so the
+- The plugin briefly pins four magenta squares to the middle of the viewport's
+  edges (not the corners, which rounded simulated device screens hide) so the
   crop is exact under any dock layout or DPI scale; they are removed before the
   final capture, and the located position is reused for 60 seconds.
 - On Windows the capture uses `PrintWindow(PW_RENDERFULLCONTENT)` via
@@ -119,6 +165,11 @@ the host OS and crops it to the viewport:
   one. Local-file titles, which show the absolute path, are matched by basename.
   Clean and cached captures verify the selected window handle and process ID;
   a missing or changed identity fails instead of switching to another client.
+- Under WSL, the server runs the same PowerShell helper through Windows interop
+  (`/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe`). It writes
+  the frame to a Linux temp file through its `\\wsl.localhost` path. WSL counts
+  as WSL with Windows interop when the kernel release names Microsoft/WSL and
+  that `powershell.exe` exists.
 - On macOS 14 or newer, ScreenCaptureKit captures only the selected Roblox Studio
   window. The MCP host must already have Screen Recording permission, and Xcode
   Command Line Tools must provide `xcrun swiftc`; when they are missing the tool
@@ -128,6 +179,30 @@ the host OS and crops it to the viewport:
   windows, or a changed window identity produce an error instead of capturing
   another window. Local-file window titles containing an absolute path are
   matched by basename; multiple matches are still rejected.
+- On native Linux, where Studio runs under Wine (see
+  [Native Linux with Wine](#native-linux-with-wine)), the server grabs the
+  Studio window from its X display. It reads `DISPLAY` and `XAUTHORITY` from the
+  Studio process's environment, so the server needs no display of its own, and
+  maps windows to Studio processes with `xprop` (package `x11-utils`). A small
+  `python3` helper reads the window through `libX11`; with a compositor running
+  it reads the window's own pixels through `libXcomposite`, so other windows on
+  top do not matter, and without one it reads the visible part of the window.
+  Because Studio's own capture of the play viewport fails or comes back black
+  under Wine, the window grab comes first for a Studio this server launched,
+  and Studio's capture is the fallback. A Studio that another server launched
+  is grabbed when StudioCaptureService is unavailable, before CaptureService;
+  every display that runs Studio is searched, and later captures of that Studio
+  go to the window first. When several Studio windows share a display (a
+  multiplayer test), the window that shows the viewport markers is used. Only
+  the current user's Studio processes are considered. The Studio window must be
+  visible: a minimized window or one on another workspace cannot be captured
+  (without a compositor its on-screen part is read, so it must also not hang
+  off the screen), and neither can a script or plugin tab in front of the
+  place's viewport tab; the tool says so. When no Studio process exposes an X
+  display (a container or remote server), Studio's own capture is used and the
+  viewport markers are never shown. Studio started through a Flatpak-sandboxed
+  launcher (for example Vinegar) is not supported: its Wine process runs in the
+  sandbox, out of the server's reach.
 - Other platforms report that host capture is unavailable and return Studio's
   original result or error.
 
@@ -149,6 +224,76 @@ For the Windows selector regression, run `npm run build -w packages/core` then
 `node tests/windows-capture-helper.mjs` on Windows or WSL with PowerShell interop.
 It exercises the shipped selector with synthetic window entries, without
 enumerating or capturing any real windows.
+
+## Video recording
+
+Roblox has no engine API that gives a plugin the bytes of a video.
+`CaptureService:StartVideoCaptureAsync` reports `Success` in a Studio
+playtest, but it never begins a capture: `CaptureBegan` and the
+`onCaptureReady` callback never fire, and no file is written
+(`tests/capture-service-video-probe.mjs`). `VideoCapture.FilePath` is readable
+only by Roblox's own scripts in any case. So `capture_video` records the Studio
+window on the MCP host instead:
+
+- It needs Windows, WSL with Windows interop, or native Linux with an X server,
+  plus FFmpeg. On Windows use FFmpeg 8.0 or newer with the `gfxcapture` source
+  (Windows Graphics Capture), for example `winget install Gyan.FFmpeg`. The
+  server runs `ffmpeg` from `PATH`, or the executable named by
+  `ROBLOX_STUDIO_FFMPEG`.
+- Under WSL it runs the Windows `ffmpeg.exe` through interop, because a Linux
+  ffmpeg cannot see Windows windows. It uses `ffmpeg.exe` from `PATH`, or
+  asks Windows PowerShell where `ffmpeg.exe` is when the server's `PATH` lacks
+  the Windows directories. Video paths are passed to it in their
+  `\\wsl.localhost` form, so recordings still land at the Linux path in the
+  result. It encodes H.264 with `libx264` when available, then
+  falls back to `h264_mf` or `mpeg4`.
+- When `gfxcapture` is missing or cannot open the window, recording falls back
+  to `gdigrab`. For example, a process started through secondary logon has no
+  per-user capture service and fails with `0x80070424`. `gdigrab` copies the
+  same client area through GDI. The result's `video.source` names the path
+  used.
+- On native Linux, where Studio runs under Wine, it records with FFmpeg 5.1 or
+  newer and its `x11grab` device (included in most distribution builds, for
+  example `sudo apt install ffmpeg`; older builds lack the options the
+  recording uses, and the tool says so). It records the Studio window on the X
+  display that the screenshot path found in the Studio process, with that
+  display's `XAUTHORITY`; with several Studio windows on one display (a
+  multiplayer test), it records the one that shows the viewport markers.
+  `x11grab` copies the window's area of the screen, so any window that covers
+  Studio, or part of it, appears in the recording. Keep Studio uncovered, fully
+  on-screen, not minimized and the same size while it records: when FFmpeg can
+  no longer read the window, the recording stops early and the tool reports a
+  failure.
+- Before recording, it locates the viewport with the same edge markers as the
+  `capture_screenshot` host fallback. It grabs those markers through the same
+  capture source as the recording, then removes them before recording starts.
+  The crop matches the recorded frames at any DPI scale. During a playtest it
+  records the client viewport.
+- Windows Graphics Capture reads the composited window, so recording continues
+  while Studio is behind other windows, but not while it is minimized. Studio
+  draws about 15 fps in the background, so bring it to the front for smooth
+  video.
+- A device-simulator viewport must use Fit to Window scaling (or simulation
+  must be stopped). Other scaling modes move the viewport once the markers are
+  removed.
+- When no capture source shows the four markers, the error lists the
+  marker-coloured blobs it found, and the frame is saved as a PNG under
+  `<temp>/robloxstudio-mcp/capture-diagnostics` (newest 5 kept).
+- `action=record` blocks for up to 30 seconds. `action=start` records until
+  `action=stop` or 5 minutes. Recordings without `output_path` go to
+  `<temp>/robloxstudio-mcp/videos`. Only the newest 20 there are kept.
+- Each result returns one JPEG storyboard of evenly spaced frames. Agents can
+  inspect motion without a video decoder. `action=storyboard` re-samples a span
+  of a saved video and needs only `ffmpeg`, on any platform.
+
+`capture_video` reads the Studio window, so `ROBLOX_STUDIO_HOST_CAPTURE=0` also
+disables it. The live regression `tests/capture-video.mjs` runs through
+`node scripts/studio-test-profile.mjs run -- tests/run-all.mjs --managed --test capture-video.mjs`.
+It needs an FFmpeg the Studio test account can read. Use one on that account's
+`PATH`, or pass `ROBLOX_STUDIO_FFMPEG=C:\...\ffmpeg.exe` to the profile
+launcher. Set `RSMCP_CAPTURE_VIDEO_OUTPUT_DIR` to a directory that account can
+write to keep the recordings. The snapshot is deleted after a passing run.
+Under the test account, recording uses `gdigrab`.
 
 ## Native Linux with Wine
 
@@ -204,8 +349,8 @@ current user's processes are listed. The start time is converted to a UTC time
 using a boot-time reference saved for each boot in the registry directory, so
 identities still match after a broker restart even if the system clock was
 stepped. `close` sends SIGTERM to that exact process, then SIGKILL if it is still
-running. Sign-in settling before close and host window capture are not available
-under Wine.
+running. Sign-in settling before close is not available under Wine. Host window
+capture works (see [Host window capture](#host-window-capture)).
 
 ## Environment variables
 
@@ -216,12 +361,15 @@ under Wine.
 | `ROBLOX_STUDIO_AUTH_TOKEN` | Auto-generated token file | Explicit shared secret that overrides the token file. |
 | `ROBLOX_STUDIO_NO_AUTH` | Unset | Set to `1` or `true` to disable HTTP tool authentication. This is not recommended. |
 | `ROBLOX_STUDIO_ALLOWED_ORIGINS` | None | Comma-separated browser origins allowed to call the HTTP API cross-origin. |
-| `ROBLOX_STUDIO_HOST_CAPTURE` | Unset | Set to `0`, `false`, or `off` to disable the host window capture fallback for `capture_screenshot`. |
+| `ROBLOX_STUDIO_HOST_CAPTURE` | Unset | Set to `0`, `false`, or `off` to disable the host window capture fallback for `capture_screenshot` and `capture_video`. |
+| `ROBLOX_STUDIO_TEST_WINDOW_CLEANUP` | Unset | Set to `0`, `false`, or `off` to stop `multiplayer_playtest` and `manage_instance` `close` from finding and closing multiplayer test windows by process. See [Multiplayer test windows](#multiplayer-test-windows). |
+| `ROBLOX_STUDIO_FFMPEG` | `ffmpeg` on `PATH` | FFmpeg executable used by `capture_video` (8.0+ on Windows, 5.1+ with `x11grab` on native Linux). See [Video recording](#video-recording). |
 | `ROBLOX_OPEN_CLOUD_API_KEY` | None | Roblox Open Cloud key used by features such as audio preview, place version access, monetization, and experience settings. Required permissions depend on the tool. |
 | `MCP_PLUGINS_DIR` | Platform Studio Plugins folder | Override the destination used by plugin installation. |
 | `ROBLOX_STUDIO_EXE` | Auto-discovered on Windows, WSL, and macOS | Studio executable to launch. Required on native Linux with a Wine launcher, where it must be an existing `RobloxStudioBeta.exe` in the Wine prefix. |
 | `ROBLOX_STUDIO_WINE_LAUNCHER` | Unset | Native Linux only: executable that `exec`s Wine on Studio. See [Native Linux with Wine](#native-linux-with-wine). |
 | `ROBLOX_STUDIO_WINE_START_TIMEOUT_MS` | `60000` | Native Linux with Wine only: how long an authorized launch may take to become `RobloxStudioBeta.exe`, from 1 to 150000 ms. |
+| `ROBLOX_STUDIO_MCP_RESPONSE_BUDGET_MS` | `25000` | Longest a playtest lifecycle call or `wait_until` holds its response, from 1000 to 3600000 ms. Work still running then returns `state: "pending"` with a `requestId` for `get_request_status`. It also caps each `get_request_status` `wait_ms`, including bridge operations and `generate_model` jobs; a capped status reports `waitCappedMs`. Raise it if your MCP client allows longer calls. |
 
 Creator Store audio preview requires the `legacy-asset:manage` scope (Legacy
 Assets → manage in the API key settings); `asset:read` alone returns 403. See
